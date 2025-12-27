@@ -1,0 +1,2 @@
+# pavlok_CLI_agent
+CLI agentにpavlokを使用させたらどうなるか自傷実験
