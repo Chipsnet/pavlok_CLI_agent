@@ -233,6 +233,7 @@ def main() -> None:
     args = parser.parse_args()
 
     question = unescape_cli_text(args.question)
+    time.sleep(2) # codex CLIが1000msくらいでTIMEOUTすることが多いので対策
 
     if args.mode == "ask":
         run_ask(
