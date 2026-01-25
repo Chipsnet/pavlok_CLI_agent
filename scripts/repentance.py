@@ -47,10 +47,11 @@ def execute_punishments() -> int:
 
             for _ in range(remaining):
                 try:
+                    # Removed date dependency, using ID instead
                     result = pavlok.call(
                         stimulus_type,
                         stimulus_value,
-                        f"repentance:{punishment.date.isoformat()}",
+                        f"repentance:id={punishment.id}",
                     )
                 except Exception:
                     punishment.executed_count += 1
@@ -75,6 +76,16 @@ def execute_punishments() -> int:
                 punishment.executed_count = punishment.punishment_count
                 punishment.state = "done"
                 session.commit()
+
+        # Always create a new record for the next cycle
+        next_cycle = DailyPunishment(
+            ignore_count=0,
+            punishment_count=0,
+            executed_count=0,
+            state="pending",
+        )
+        session.add(next_cycle)
+        session.commit()
 
         return executed_total
     finally:

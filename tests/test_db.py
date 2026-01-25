@@ -15,7 +15,6 @@ def test_db_crud(db_session):
     db_session.add(schedule)
 
     punishment = models.DailyPunishment(
-        date=now.date(),
         ignore_count=1,
         punishment_count=1,
         executed_count=0,

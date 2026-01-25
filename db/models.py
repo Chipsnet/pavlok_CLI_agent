@@ -47,7 +47,6 @@ class DailyPunishment(Base):
     __tablename__ = "daily_punishments"
 
     id = Column(Integer, primary_key=True)
-    date = Column(Date, nullable=False, unique=True)
     ignore_count = Column(Integer, nullable=False)
     punishment_count = Column(Integer, nullable=False)
     executed_count = Column(Integer, nullable=False, default=0)
