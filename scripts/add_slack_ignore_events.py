@@ -31,19 +31,23 @@ def add_event(slack_message_ts: str, detected_at: datetime | None = None) -> int
         )
         session.add(event)
 
-        punishment = session.query(DailyPunishment).filter_by(date=event_date).first()
-        if punishment is None:
+        punishment = (
+            session.query(DailyPunishment)
+            .order_by(DailyPunishment.id.desc())
+            .first()
+        )
+        
+        if punishment and punishment.state in ("pending", "failed"):
+            punishment.ignore_count += 1
+            punishment.punishment_count += 1
+        else:
             punishment = DailyPunishment(
-                date=event_date,
                 ignore_count=1,
                 punishment_count=1,
                 executed_count=0,
                 state="pending",
             )
             session.add(punishment)
-        else:
-            punishment.ignore_count += 1
-            punishment.punishment_count += 1
 
         session.commit()
     except Exception:

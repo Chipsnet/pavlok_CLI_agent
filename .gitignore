@@ -207,6 +207,4 @@ marimo/_lsp/
 __marimo__/
 
 # custom
-ZANGE
 app.db
-.DS_Store
