@@ -62,7 +62,8 @@ def add_event(slack_message_ts: str, detected_at: datetime | None = None) -> int
 def remaining_total() -> int:
     session = SessionLocal()
     try:
-        rows = session.query(DailyPunishment).all()
+        rows = session.query(DailyPunishment).filter(DailyPunishment.state != "done").all()
+
         total = 0
         for row in rows:
             total += max(row.punishment_count - row.executed_count, 0)

@@ -10,7 +10,7 @@ Use `scripts/add_schedules.py` to insert multiple records into `schedules`.
 ## Run
 
 ```bash
-uv run scripts/add_schedules.py '[{"prompt_name":"pavlok","input_value":"zap 30","scheduled_date":"2026-01-10 09:30"}]'
+uv run scripts/add_schedules.py '[{"prompt_name":"remind_ask","input_value":"パチンコ行ってないか確認","scheduled_date":"2026-01-10 09:30"}]'
 ```
 
 ```bash
