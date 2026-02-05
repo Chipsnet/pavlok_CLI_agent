@@ -167,11 +167,11 @@ def wait_for_reply(
         ignore_limit = 0
 
     start_time = time.monotonic()
-    timeout_deadline = start_time + (ignore_span * ignore_limit)
+
     next_ignore_at = start_time + ignore_span if ignore_span else None
     ignore_ct = 0
 
-    while time.monotonic() <= timeout_deadline:
+    while True:
         reply = find_user_reply(fetch_replies(channel, thread_ts, read_token), thread_ts)
         if reply is not None:
             return reply
@@ -181,13 +181,19 @@ def wait_for_reply(
             ignore_ct += 1
 
             try:
-                add_ignore.add_event(f"{thread_ts}_{ignore_ct}")
+                remaining_total = add_ignore.add_event(f"{thread_ts}_{ignore_ct}")
             except Exception as exc:
                 raise SystemExit(
                     f"Failed to record slack ignore event: {exc}"
                 ) from exc
 
-            post_reply(f"==無視{ignore_ct}回目==\n{follow_up_message}", thread_ts, post_token, channel)
+            follow_up_text = follow_up_message or ""
+            post_reply(
+                f"==無視{ignore_ct}回目==\n{follow_up_text}\n\n夜の刑罰回数: {remaining_total}",
+                thread_ts,
+                post_token,
+                channel,
+            )
 
             if ignore_limit and ignore_ct >= ignore_limit:
                 break
