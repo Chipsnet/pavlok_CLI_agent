@@ -6,6 +6,8 @@ import time
 import requests
 from dotenv import load_dotenv
 
+from scripts import add_slack_ignore_events as add_ignore
+
 load_dotenv()
 
 SLACK_API_BASE = "https://slack.com/api"
@@ -44,6 +46,18 @@ def require_channel(override: str | None = None) -> str:
 
 def build_headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
+
+
+def get_int_env(name: str, default: int | None = None) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        if default is None:
+            raise SystemExit(f"{name} is not set. Add it to .env or the environment.")
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise SystemExit(f"{name} must be an integer.") from exc
 
 
 def parse_response(response: requests.Response) -> dict:
@@ -114,9 +128,21 @@ def fetch_replies(channel: str, thread_ts: str, token: str) -> list:
     return data.get("messages", [])
 
 
+def is_bot_message(message: dict) -> bool:
+    if message.get("subtype") == "bot_message":
+        return True
+    if message.get("bot_id"):
+        return True
+    if message.get("bot_profile"):
+        return True
+    return False
+
+
 def find_user_reply(messages: list, thread_ts: str) -> str | None:
     for message in messages:
         if message.get("ts") == thread_ts:
+            continue
+        if is_bot_message(message):
             continue
         if message.get("subtype"):
             continue
@@ -129,18 +155,48 @@ def find_user_reply(messages: list, thread_ts: str) -> str | None:
 def wait_for_reply(
     channel: str,
     thread_ts: str,
-    token: str,
-    timeout_sec: float,
+    read_token: str,
+    post_token: str,
     poll_interval_sec: float,
+    follow_up_message: str | None = None,
 ) -> str | None:
-    deadline = time.monotonic() + timeout_sec
-    while True:
-        reply = find_user_reply(fetch_replies(channel, thread_ts, token), thread_ts)
+    ignore_span = get_int_env("IGNORE_SPAN", default=0)
+    ignore_limit = get_int_env("REPLY_COUNT_LIMIT", default=0)
+    if ignore_span <= 0 or ignore_limit <= 0:
+        ignore_span = 0
+        ignore_limit = 0
+
+    start_time = time.monotonic()
+    timeout_deadline = start_time + (ignore_span * ignore_limit)
+    next_ignore_at = start_time + ignore_span if ignore_span else None
+    ignore_ct = 0
+
+    while time.monotonic() <= timeout_deadline:
+        reply = find_user_reply(fetch_replies(channel, thread_ts, read_token), thread_ts)
         if reply is not None:
             return reply
-        if time.monotonic() >= deadline:
-            return None
-        time.sleep(poll_interval_sec)
+
+        now = time.monotonic()
+        if next_ignore_at is not None and now >= next_ignore_at:
+            ignore_ct += 1
+
+            try:
+                add_ignore.add_event(f"{thread_ts}_{ignore_ct}")
+            except Exception as exc:
+                raise SystemExit(
+                    f"Failed to record slack ignore event: {exc}"
+                ) from exc
+
+            post_reply(f"==無視{ignore_ct}回目==\n{follow_up_message}", thread_ts, post_token, channel)
+
+            if ignore_limit and ignore_ct >= ignore_limit:
+                break
+            if ignore_span:
+                next_ignore_at += ignore_span
+
+        if poll_interval_sec > 0:
+            time.sleep(poll_interval_sec)
+    return None
 
 
 def build_result(
@@ -165,7 +221,7 @@ def print_result(payload: dict) -> None:
 
 def run_ask(
     question: str,
-    timeout: float,
+    follow_up_message: str | None,
     interval: float,
     no_reply_hint: bool,
     channel_override: str | None,
@@ -176,7 +232,14 @@ def run_ask(
     channel_id, thread_ts = post_question(
         question, bot_token, not no_reply_hint, channel
     )
-    reply = wait_for_reply(channel_id, thread_ts, reply_token, timeout, interval)
+    reply = wait_for_reply(
+        channel_id,
+        thread_ts,
+        reply_token,
+        bot_token,
+        interval,
+        follow_up_message,
+    )
     if reply is None:
         payload = build_result(question, None, False, thread_ts, thread_ts)
     else:
@@ -214,12 +277,6 @@ def main() -> None:
         help="Slack channel name or ID (defaults to SLACK_CHANNEL).",
     )
     parser.add_argument(
-        "--timeout",
-        type=float,
-        default=60,
-        help="Seconds to wait for a reply.",
-    )
-    parser.add_argument(
         "--interval",
         type=float,
         default=2,
@@ -230,15 +287,27 @@ def main() -> None:
         action="store_true",
         help="Do not append a reply hint line.",
     )
+    parser.add_argument(
+        "--follow-up-message",
+        help="Message to post when a reply is not received in time (required in ask mode).",
+    )
     args = parser.parse_args()
 
+    if args.mode == "ask" and args.follow_up_message is None:
+        raise SystemExit("--follow-up-message is required in ask mode.")
+
     question = unescape_cli_text(args.question)
+    follow_up_message = (
+        unescape_cli_text(args.follow_up_message)
+        if args.follow_up_message is not None
+        else None
+    )
     time.sleep(2) # codex CLIが1000msくらいでTIMEOUTすることが多いので対策
 
     if args.mode == "ask":
         run_ask(
             question=question,
-            timeout=args.timeout,
+            follow_up_message=follow_up_message,
             interval=args.interval,
             no_reply_hint=args.no_reply_hint,
             channel_override=args.channel,

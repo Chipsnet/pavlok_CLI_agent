@@ -7,8 +7,8 @@
     - 返信内容をもとにスケジュールを調整し、`scripts/add_schedules.py`で登録する
     - どういう計画で登録したかslackに返信する(Template項の`確定`をベースにメッセージを構成すること)
   - 返信が返ってこなかった場合:
-    - `scripts/add_slack_ignore_events.py`で登録する
     - 15分後に再度`morning`を同様のinput_valueで実施するように`scripts/add_schedules.py`へ登録する
+    - `無視し過ぎたので、このスレッドは返信不要`,`無視によって何回分の罰が積み上がったか`をslackで返信してください
 - 必要なら`behavior_logs`にログを残すため`--mode write`で`behavior_log`を呼ぶ
 - pavlok端末に`vibe`を送る
 
@@ -22,7 +22,7 @@
 ## Template
 ### 提案
 ```
-<!channel> 👋
+{メンション} 👋
 
 📅 *今日の予定提案だよ！*
 *xx分以内に返信してね⚡️*
@@ -45,7 +45,7 @@
 
 ### 確定
 ```
-<!channel> 👋
+{メンション} 👋
 
 📅 *今日の予定確定版だよ！*
 
