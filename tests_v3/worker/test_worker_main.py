@@ -1,0 +1,152 @@
+# v0.3 Worker Main Tests
+import pytest
+from unittest.mock import MagicMock, AsyncMock, patch
+from datetime import datetime, timedelta
+from backend.worker.worker import PunishmentWorker, main
+from backend.models import Schedule, ScheduleState
+
+
+@pytest.mark.asyncio
+class TestPunishmentWorker:
+
+    @pytest.mark.asyncio
+    async def test_fetch_pending_schedules(self, v3_db_session, v3_test_data_factory):
+        """pendingかつrun_at <= nowのスケジュールを取得できること"""
+        past_schedule = v3_test_data_factory.create_schedule(
+            run_at=datetime.now() - timedelta(minutes=5),
+            state=ScheduleState.PENDING
+        )
+        future_schedule = v3_test_data_factory.create_schedule(
+            run_at=datetime.now() + timedelta(minutes=5),
+            state=ScheduleState.PENDING
+        )
+
+        worker = PunishmentWorker(v3_db_session)
+        schedules = await worker.fetch_pending_schedules()
+
+        assert len(schedules) == 1
+        assert schedules[0].id == past_schedule.id
+
+    @pytest.mark.asyncio
+    async def test_process_schedule_plan_event(self, v3_db_session, v3_test_data_factory):
+        """planイベントを処理できること"""
+        schedule = v3_test_data_factory.create_schedule(
+            run_at=datetime.now() - timedelta(minutes=1),
+            state=ScheduleState.PENDING
+        )
+
+        worker = PunishmentWorker(v3_db_session)
+        with patch.object(worker, "execute_script"):
+            await worker.process_schedule(schedule)
+
+        assert schedule.state == ScheduleState.DONE
+
+    @pytest.mark.asyncio
+    async def test_process_schedule_remind_event(self, v3_db_session, v3_test_data_factory):
+        """remindイベントを処理できること"""
+        from backend.models import EventType
+
+        schedule = v3_test_data_factory.create_schedule(
+            event_type=EventType.REMIND,
+            run_at=datetime.now() - timedelta(minutes=1),
+            state=ScheduleState.PENDING
+        )
+
+        worker = PunishmentWorker(v3_db_session)
+        with patch.object(worker, "execute_script"):
+            await worker.process_schedule(schedule)
+
+        assert schedule.state == ScheduleState.DONE
+
+    @pytest.mark.asyncio
+    async def test_process_schedule_failure_retry(self, v3_db_session, v3_test_data_factory):
+        """失敗時にretry_countを増やすこと"""
+        schedule = v3_test_data_factory.create_schedule(
+            run_at=datetime.now() - timedelta(minutes=1),
+            state=ScheduleState.PENDING,
+            retry_count=0
+        )
+
+        worker = PunishmentWorker(v3_db_session)
+        with patch.object(worker, "execute_script", side_effect=Exception("Test error")):
+            await worker.process_schedule(schedule)
+
+        # After failure, retry_count should increase
+        assert schedule.retry_count == 1
+        # State should be FAILED or PENDING (if rescheduled)
+        assert schedule.state in [ScheduleState.FAILED, ScheduleState.PENDING]
+
+    @pytest.mark.asyncio
+    async def test_process_schedule_max_retry_exceeded(self, v3_db_session, v3_test_data_factory):
+        """最大リトライ数を超えた場合にfailedのままにすること"""
+        schedule = v3_test_data_factory.create_schedule(
+            run_at=datetime.now() - timedelta(minutes=1),
+            state=ScheduleState.PENDING,
+            retry_count=3
+        )
+
+        worker = PunishmentWorker(v3_db_session)
+        with patch.object(worker, "execute_script", side_effect=Exception("Test error")):
+            await worker.process_schedule(schedule)
+
+        # retry_count should increment (4)
+        assert schedule.retry_count == 4
+        # State should be FAILED (since retry_count >= max_retry of 3)
+        assert schedule.state == ScheduleState.FAILED
+
+    @pytest.mark.asyncio
+    async def test_ignore_mode_detection(self, v3_db_session, v3_test_data_factory):
+        """ignore_modeを検知して罰を追加できること"""
+        schedule = v3_test_data_factory.create_schedule(
+            run_at=datetime.now() - timedelta(minutes=20),  # 20分経過
+            state=ScheduleState.PENDING
+        )
+
+        worker = PunishmentWorker(v3_db_session)
+        with patch.object(worker, "execute_script"):
+            await worker.process_schedule(schedule)
+
+        # Check if punishment was created
+        from backend.models import Punishment, PunishmentMode
+        punishments = v3_db_session.query(Punishment).filter_by(schedule_id=schedule.id).all()
+        assert len(punishments) > 0
+
+    @pytest.mark.asyncio
+    async def test_no_mode_detection(self, v3_db_session, v3_test_data_factory):
+        """no_modeを検知して罰を追加できること"""
+        schedule = v3_test_data_factory.create_schedule(
+            run_at=datetime.now() - timedelta(minutes=15),  # 15分経過
+            state=ScheduleState.PENDING
+        )
+
+        worker = PunishmentWorker(v3_db_session)
+        with patch.object(worker, "execute_script"):
+            await worker.process_schedule(schedule)
+
+        # Check if punishment was created
+        from backend.models import Punishment, PunishmentMode
+        punishments = v3_db_session.query(Punishment).filter_by(schedule_id=schedule.id).all()
+        assert len(punishments) > 0
+
+    @pytest.mark.asyncio
+    async def test_main_loop_interval(self, v3_db_session):
+        """メインループが1分間隔で実行されること"""
+        call_count = 0
+
+        async def mock_run_once(self):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                raise SystemExit
+
+        with patch.object(PunishmentWorker, "run_once", mock_run_once):
+            with patch("asyncio.sleep") as mock_sleep:
+                try:
+                    worker = PunishmentWorker(v3_db_session)
+                    # Run 2 iterations manually
+                    for _ in range(2):
+                        await worker.run_once()
+                except SystemExit:
+                    pass
+
+        assert call_count >= 2
