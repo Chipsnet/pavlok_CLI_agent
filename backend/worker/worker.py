@@ -23,6 +23,81 @@ class PunishmentWorker:
             session: DBセッション
         """
         self.session = session
+        self._bootstrap_checked = False
+
+    def _resolve_bootstrap_user_id(self) -> Optional[str]:
+        """
+        Resolve user_id for initial plan bootstrap.
+        Priority:
+        1. Active commitments
+        2. Latest schedules history
+        3. DEFAULT_USER_ID / SLACK_USER_ID env
+        """
+        from backend.models import Commitment, Schedule
+
+        commitment_row = (
+            self.session.query(Commitment.user_id)
+            .filter(Commitment.active.is_(True))
+            .order_by(Commitment.updated_at.desc())
+            .first()
+        )
+        if commitment_row and commitment_row[0]:
+            return str(commitment_row[0])
+
+        schedule_row = (
+            self.session.query(Schedule.user_id)
+            .order_by(Schedule.updated_at.desc())
+            .first()
+        )
+        if schedule_row and schedule_row[0]:
+            return str(schedule_row[0])
+
+        fallback = os.getenv("DEFAULT_USER_ID") or os.getenv("SLACK_USER_ID")
+        return fallback or None
+
+    async def ensure_initial_plan_schedule(self) -> Optional[str]:
+        """
+        Bootstrap first plan schedule if no pending/processing records exist.
+
+        Returns:
+            Created schedule id if inserted, otherwise None.
+        """
+        from backend.models import Schedule, ScheduleState, EventType
+
+        in_flight_count = (
+            self.session.query(Schedule)
+            .filter(Schedule.state.in_([ScheduleState.PENDING, ScheduleState.PROCESSING]))
+            .count()
+        )
+        if in_flight_count > 0:
+            logger.info(
+                "Bootstrap skipped: pending+processing schedules exist (%s)",
+                in_flight_count,
+            )
+            return None
+
+        user_id = self._resolve_bootstrap_user_id()
+        if not user_id:
+            logger.warning(
+                "Bootstrap skipped: cannot resolve user_id for initial plan schedule"
+            )
+            return None
+
+        schedule = Schedule(
+            user_id=user_id,
+            event_type=EventType.PLAN,
+            run_at=datetime.now(),
+            state=ScheduleState.PENDING,
+            retry_count=0,
+        )
+        self.session.add(schedule)
+        self.session.commit()
+        logger.info(
+            "Bootstrap inserted initial plan schedule: schedule_id=%s user_id=%s",
+            schedule.id,
+            user_id,
+        )
+        return str(schedule.id)
 
     async def fetch_pending_schedules(self) -> List:
         """
@@ -117,6 +192,15 @@ class PunishmentWorker:
         """
         1回分の処理を実行する
         """
+        if not self._bootstrap_checked:
+            try:
+                await self.ensure_initial_plan_schedule()
+            except Exception as e:
+                self.session.rollback()
+                logger.error(f"Bootstrap error: {e}")
+            finally:
+                self._bootstrap_checked = True
+
         schedules = await self.fetch_pending_schedules()
         logger.info(f"Processing {len(schedules)} schedules")
 

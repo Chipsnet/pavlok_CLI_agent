@@ -3,7 +3,7 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from datetime import datetime, timedelta
 from backend.worker.worker import PunishmentWorker, main
-from backend.models import Schedule, ScheduleState
+from backend.models import Schedule, ScheduleState, EventType
 
 
 @pytest.mark.asyncio
@@ -26,6 +26,38 @@ class TestPunishmentWorker:
 
         assert len(schedules) == 1
         assert schedules[0].id == past_schedule.id
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_inserts_initial_plan_when_no_inflight(
+        self, v3_db_session, v3_test_data_factory
+    ):
+        """pending/processingが0なら初回planを登録すること"""
+        v3_test_data_factory.create_commitment(task="朝のタスク", time="07:00:00")
+
+        worker = PunishmentWorker(v3_db_session)
+        created_id = await worker.ensure_initial_plan_schedule()
+
+        assert created_id is not None
+        created = v3_db_session.query(Schedule).filter_by(id=created_id).one()
+        assert created.event_type == EventType.PLAN
+        assert created.state == ScheduleState.PENDING
+        assert created.run_at <= datetime.now()
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_skips_when_inflight_exists(self, v3_db_session, v3_test_data_factory):
+        """pending/processingが存在する場合は初回planを登録しないこと"""
+        v3_test_data_factory.create_schedule(
+            event_type=EventType.PLAN,
+            run_at=datetime.now() - timedelta(minutes=1),
+            state=ScheduleState.PENDING,
+        )
+
+        worker = PunishmentWorker(v3_db_session)
+        created_id = await worker.ensure_initial_plan_schedule()
+
+        assert created_id is None
+        schedules = v3_db_session.query(Schedule).all()
+        assert len(schedules) == 1
 
     @pytest.mark.asyncio
     async def test_process_schedule_plan_event(self, v3_db_session, v3_test_data_factory):
