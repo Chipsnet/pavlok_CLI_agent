@@ -7,6 +7,7 @@ from typing import Dict, Any
 import requests
 
 MAX_COMMITMENT_ROWS = 10
+MIN_COMMITMENT_ROWS = 3
 
 
 def _current_commitments_from_view(view: Dict[str, Any]) -> list[dict[str, str]]:
@@ -55,6 +56,29 @@ async def process_commitment_add_row(payload_data: Dict[str, Any]) -> Dict[str, 
         commitments.append({"task": "", "time": ""})
 
     updated_view = base_commit_modal(commitments)
+    return await _apply_modal_update(view, updated_view, "commitment_add_row")
+
+
+async def process_commitment_remove_row(payload_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handle "- 削除" in base_commit modal.
+    Removes the last commitment row while keeping at least MIN_COMMITMENT_ROWS.
+    """
+    from backend.slack_ui import base_commit_modal
+
+    view = payload_data.get("view", {})
+    commitments = _current_commitments_from_view(view)
+    if len(commitments) > MIN_COMMITMENT_ROWS:
+        commitments = commitments[:-1]
+
+    updated_view = base_commit_modal(commitments)
+    return await _apply_modal_update(view, updated_view, "commitment_remove_row")
+
+
+async def _apply_modal_update(
+    view: Dict[str, Any], updated_view: Dict[str, Any], action_name: str
+) -> Dict[str, Any]:
+    """Update modal via views.update, or fallback to response_action update."""
 
     # Keep metadata flags that may be set by previous view state.
     for key in ("private_metadata", "clear_on_close", "notify_on_close", "external_id"):
@@ -68,10 +92,10 @@ async def process_commitment_add_row(payload_data: Dict[str, Any]) -> Dict[str, 
     # Best-effort fallback for local tests or environments without view_id/token.
     if not view_id or not bot_token:
         if not view_id:
-            print(f"[{datetime.now()}] commitment_add_row fallback: missing view_id")
+            print(f"[{datetime.now()}] {action_name} fallback: missing view_id")
         if not bot_token:
             print(
-                f"[{datetime.now()}] commitment_add_row fallback: "
+                f"[{datetime.now()}] {action_name} fallback: "
                 "SLACK_BOT_USER_OAUTH_TOKEN is not configured"
             )
         return {
@@ -115,14 +139,14 @@ async def process_commitment_add_row(payload_data: Dict[str, Any]) -> Dict[str, 
 
     ok, reason = await asyncio.to_thread(_call_views_update)
     if not ok:
-        print(f"[{datetime.now()}] views.update failed: {reason}")
+        print(f"[{datetime.now()}] {action_name} views.update failed: {reason}")
         # Try a fallback response for resilience, though Slack may ignore this path for block_actions.
         return {
             "response_action": "update",
             "view": updated_view,
         }
 
-    print(f"[{datetime.now()}] views.update succeeded")
+    print(f"[{datetime.now()}] {action_name} views.update succeeded")
     # Acknowledge block_actions. Modal update has already been done via Web API.
     return {
         "status": "success",

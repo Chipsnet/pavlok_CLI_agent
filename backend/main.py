@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from .api import (
     process_base_commit, process_stop, process_restart, process_config,
     process_plan_submit, process_remind_response, process_ignore_response,
-    process_commitment_add_row,
+    process_commitment_add_row, process_commitment_remove_row,
 )
 from .api.signature import verify_slack_signature
 from .api.internal_protection import verify_internal_request
@@ -218,6 +218,8 @@ async def route_interactive_payload(payload_data):
             action_id = actions[0].get("action_id")
             if action_id == "commitment_add_row":
                 return await process_commitment_add_row(payload_data)
+            if action_id == "commitment_remove_row":
+                return await process_commitment_remove_row(payload_data)
             if action_id == "remind_yes":
                 return await process_remind_response(payload_data, "YES")
             if action_id == "remind_no":

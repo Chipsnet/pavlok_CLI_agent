@@ -8,6 +8,7 @@ from .interactive import (
     process_remind_response,
     process_ignore_response,
     process_commitment_add_row,
+    process_commitment_remove_row,
 )
 from ..slack_ui import base_commit_modal
 # Export all API modules

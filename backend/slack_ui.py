@@ -84,6 +84,7 @@ def _commitment_row_blocks(index: int, commitment: dict[str, Any] | None = None)
             },
             "element": task_element,
             "dispatch_action": True,
+            "optional": True,
         },
         {
             "type": "input",
@@ -134,6 +135,15 @@ def base_commit_modal(commitments: list[dict[str, Any]]) -> dict[str, Any]:
                     },
                     "style": "primary",
                     "action_id": "commitment_add_row",
+                },
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "- 削除",
+                    },
+                    "style": "danger",
+                    "action_id": "commitment_remove_row",
                 }
             ],
         },

@@ -7,6 +7,7 @@ from backend.api.interactive import (
     process_remind_response,
     process_ignore_response,
     process_commitment_add_row,
+    process_commitment_remove_row,
 )
 from backend.models import Schedule, ActionLog, ActionResult
 from backend.slack_ui import base_commit_modal
@@ -175,3 +176,47 @@ class TestInteractiveApi:
             if b.get("block_id", "").startswith("commitment_")
         ]
         assert len(task_blocks) == 10
+
+    @pytest.mark.asyncio
+    async def test_commitment_remove_row_updates_modal(self):
+        commitments = [{"task": f"task-{i}", "time": "07:00"} for i in range(1, 5)]
+        modal = base_commit_modal(commitments)
+        payload_data = {
+            "type": "block_actions",
+            "user": {"id": "U03JBULT484"},
+            "actions": [{"action_id": "commitment_remove_row"}],
+            "view": {
+                **modal,
+                "state": {"values": {}},
+            },
+        }
+
+        result = await process_commitment_remove_row(payload_data)
+        assert result["response_action"] == "update"
+        updated_view = result["view"]
+        task_blocks = [
+            b for b in updated_view["blocks"]
+            if b.get("block_id", "").startswith("commitment_")
+        ]
+        assert len(task_blocks) == 3
+
+    @pytest.mark.asyncio
+    async def test_commitment_remove_row_keeps_min_rows(self):
+        modal = base_commit_modal([])
+        payload_data = {
+            "type": "block_actions",
+            "user": {"id": "U03JBULT484"},
+            "actions": [{"action_id": "commitment_remove_row"}],
+            "view": {
+                **modal,
+                "state": {"values": {}},
+            },
+        }
+
+        result = await process_commitment_remove_row(payload_data)
+        updated_view = result["view"]
+        task_blocks = [
+            b for b in updated_view["blocks"]
+            if b.get("block_id", "").startswith("commitment_")
+        ]
+        assert len(task_blocks) == 3

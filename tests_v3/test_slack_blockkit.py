@@ -49,18 +49,36 @@ class TestBlockKitBaseCommit:
 
         modal = base_commit_modal([])
 
-        # Check add row button
+        # Check add/remove row buttons
         actions_blocks = [b for b in modal["blocks"] if b.get("type") == "actions"]
         add_button = None
+        remove_button = None
         for block in actions_blocks:
             for elem in block.get("elements", []):
                 if elem.get("action_id") == "commitment_add_row":
                     add_button = elem
-                    break
+                if elem.get("action_id") == "commitment_remove_row":
+                    remove_button = elem
 
         assert add_button is not None
         assert add_button["text"]["text"] == "+ 追加"
         assert add_button["style"] == "primary"
+        assert remove_button is not None
+        assert remove_button["text"]["text"] == "- 削除"
+        assert remove_button["style"] == "danger"
+
+    def test_base_commit_modal_task_inputs_are_optional(self):
+        """Task inputs should be optional so blank added rows don't fail validation."""
+        from backend.slack_ui import base_commit_modal
+
+        modal = base_commit_modal([])
+        task_blocks = [
+            b for b in modal["blocks"]
+            if b.get("block_id", "").startswith("commitment_")
+        ]
+        assert len(task_blocks) >= 3
+        for block in task_blocks:
+            assert block.get("optional") is True
 
 
 class TestBlockKitStopRestart:
