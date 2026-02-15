@@ -48,6 +48,32 @@ def _commitment_row_blocks(index: int, commitment: dict[str, Any] | None = None)
     task = commitment.get("task", "") if commitment else ""
     time = commitment.get("time", "") if commitment else ""
 
+    task_element = {
+        "type": "plain_text_input",
+        "action_id": f"task_{index}",
+        "placeholder": {
+            "type": "plain_text",
+            "text": "タスク名",
+        },
+        "max_length": 100,
+    }
+    if task:
+        task_element["initial_value"] = task
+
+    time_element = {
+        "type": "timepicker",
+        "action_id": f"time_{index}",
+        "placeholder": {
+            "type": "plain_text",
+            "text": "時間を選択",
+        },
+    }
+    if time and len(time) >= 5:
+        candidate = time[:5]
+        hh, mm = candidate.split(":") if ":" in candidate else ("", "")
+        if hh.isdigit() and mm.isdigit() and 0 <= int(hh) <= 23 and 0 <= int(mm) <= 59:
+            time_element["initial_time"] = candidate
+
     return [
         {
             "type": "input",
@@ -56,16 +82,7 @@ def _commitment_row_blocks(index: int, commitment: dict[str, Any] | None = None)
                 "type": "plain_text",
                 "text": f"コミットメント {index}",
             },
-            "element": {
-                "type": "plain_text_input",
-                "action_id": f"task_{index}",
-                "initial_value": task,
-                "placeholder": {
-                    "type": "plain_text",
-                    "text": "タスク名",
-                },
-                "max_length": 100,
-            },
+            "element": task_element,
             "dispatch_action": True,
         },
         {
@@ -75,15 +92,7 @@ def _commitment_row_blocks(index: int, commitment: dict[str, Any] | None = None)
                 "type": "plain_text",
                 "text": f"時刻 {index}",
             },
-            "element": {
-                "type": "timepicker",
-                "action_id": f"time_{index}",
-                "initial_time": time[:5] if len(time) >= 5 else time,
-                "placeholder": {
-                    "type": "plain_text",
-                    "text": "時間を選択",
-                },
-            },
+            "element": time_element,
             "optional": True,
         },
     ]

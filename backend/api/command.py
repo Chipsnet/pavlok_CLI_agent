@@ -38,7 +38,11 @@ def _open_slack_modal(trigger_id: str, view: Dict[str, Any]) -> tuple[bool, str]
         return False, f"views.open non-JSON response: status={response.status_code}"
 
     if not payload.get("ok"):
-        return False, payload.get("error", "views.open failed")
+        error = payload.get("error", "views.open failed")
+        details = payload.get("response_metadata", {}).get("messages", [])
+        if details:
+            return False, f"{error} ({'; '.join(details)})"
+        return False, error
 
     return True, "ok"
 

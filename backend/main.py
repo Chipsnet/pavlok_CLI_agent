@@ -207,7 +207,7 @@ async def route_interactive_payload(payload_data):
 
     if action_type == "view_submission":
         callback_id = payload_data.get("view", {}).get("callback_id")
-        if callback_id == "commitment_submit":
+        if callback_id in {"commitment_submit", "base_commit_submit"}:
             return await process_plan_submit(payload_data)
         if callback_id == "config_submit":
             return await process_config(payload_data)
