@@ -112,7 +112,7 @@ class TestInteractiveApi:
                         "task_2_date": {
                             "date": {
                                 "selected_option": {
-                                    "value": "tomorrow",
+                                    "value": "today",
                                 }
                             }
                         },
@@ -160,6 +160,11 @@ class TestInteractiveApi:
             .all()
         )
         assert len(remind_schedules) == 2
+        assert len({r.run_at.date() for r in remind_schedules}) == 1
+        assert sorted(r.run_at.strftime("%H:%M:%S") for r in remind_schedules) == [
+            "06:00:00",
+            "12:00:00",
+        ]
 
         next_plan_schedules = (
             session.query(Schedule)
