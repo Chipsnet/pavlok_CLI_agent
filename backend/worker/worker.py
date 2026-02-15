@@ -1,8 +1,10 @@
 """Punishment Worker Main Module"""
 import asyncio
 import os
+import sys
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine
@@ -77,10 +79,31 @@ class PunishmentWorker:
             )
             return None
 
+        now = datetime.now()
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        existing_today = (
+            self.session.query(Schedule.id)
+            .filter(
+                Schedule.user_id == user_id,
+                Schedule.event_type == EventType.PLAN,
+                Schedule.run_at >= day_start,
+                Schedule.run_at < day_end,
+            )
+            .first()
+        )
+        if existing_today:
+            logger.info(
+                "Bootstrap skipped: today's plan already exists for user_id=%s schedule_id=%s",
+                user_id,
+                existing_today[0],
+            )
+            return None
+
         schedule = Schedule(
             user_id=user_id,
             event_type=EventType.PLAN,
-            run_at=datetime.now(),
+            run_at=now,
             state=ScheduleState.PENDING,
             retry_count=0,
         )
@@ -119,14 +142,18 @@ class PunishmentWorker:
             schedule: 対象スケジュール
         """
         import subprocess
-        scripts_dir = os.path.join(os.path.dirname(__file__), "..", "scripts")
-        script_path = os.path.join(scripts_dir, script_name)
+
+        repo_root = Path(__file__).resolve().parents[2]
+        script_path = repo_root / "scripts" / script_name
 
         env = os.environ.copy()
         env["SCHEDULE_ID"] = str(schedule.id)
 
+        if not script_path.is_file():
+            raise Exception(f"Script file not found: {script_path}")
+
         result = subprocess.run(
-            ["python", script_path],
+            [sys.executable, str(script_path)],
             env=env,
             capture_output=True,
             text=True
@@ -147,6 +174,10 @@ class PunishmentWorker:
         from backend.worker.no_mode import detect_no_mode
 
         try:
+            # Mark as processing while script is running / waiting for user response.
+            schedule.state = ScheduleState.PROCESSING
+            self.session.commit()
+
             # Execute script based on event_type
             if schedule.event_type == EventType.PLAN:
                 await self.execute_script("plan.py", schedule)
@@ -163,8 +194,10 @@ class PunishmentWorker:
             if no_result["detected"]:
                 logger.info(f"no_mode detected: {no_result['no_time']}")
 
-            # Mark as done
-            schedule.state = ScheduleState.DONE
+            # For plan, keep processing until user submits response.
+            # For remind, keep current behavior and mark done after notification.
+            if schedule.event_type == EventType.REMIND:
+                schedule.state = ScheduleState.DONE
             self.session.commit()
 
         except Exception as e:

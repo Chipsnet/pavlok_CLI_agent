@@ -7,6 +7,7 @@ from .interactive import (
     process_plan_submit,
     process_remind_response,
     process_ignore_response,
+    process_plan_open_modal,
     process_commitment_add_row,
     process_commitment_remove_row,
 )

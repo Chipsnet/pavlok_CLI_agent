@@ -60,13 +60,13 @@ def main():
         }
 
         # Get channel
-        channel = scripts.require_channel()
+        channel = slack.require_channel()
 
         # Post plan open notification
-        token = scripts.require_bot_token()
+        token = slack.require_bot_token()
         blocks = BlockKitBuilder.plan_open_notification(schedule_id)
 
-        response = scripts.post_message(blocks, channel, token)
+        response = slack.post_message(blocks, channel, token)
 
         # Save thread_ts for later updates
         thread_ts = response.json().get("message", {}).get("ts")

@@ -59,10 +59,10 @@ def main():
             description = schedule.yes_comment or "やってるか？"
 
         # Get channel
-        channel = scripts.require_channel()
+        channel = slack.require_channel()
 
         # Post remind notification
-        token = scripts.require_bot_token()
+        token = slack.require_bot_token()
         blocks = BlockKitBuilder.remind_notification(
             schedule_id=schedule_id,
             task_name=task_name,
@@ -70,7 +70,7 @@ def main():
             description=description
         )
 
-        response = scripts.post_message(blocks, channel, token)
+        response = slack.post_message(blocks, channel, token)
 
         # Save thread_ts for later updates
         thread_ts = response.json().get("message", {}).get("ts")

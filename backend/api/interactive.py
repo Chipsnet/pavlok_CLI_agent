@@ -287,6 +287,124 @@ async def process_commitment_remove_row(payload_data: Dict[str, Any]) -> Dict[st
     return await _apply_modal_update(view, updated_view, "commitment_remove_row")
 
 
+def _load_active_commitments_for_user(user_id: str) -> list[dict[str, str]]:
+    """Load active commitments for a user, sorted by time."""
+    if not user_id:
+        return []
+
+    session = _get_session()
+    try:
+        rows = (
+            session.query(Commitment)
+            .filter(
+                Commitment.user_id == user_id,
+                Commitment.active.is_(True),
+            )
+            .order_by(Commitment.time.asc(), Commitment.created_at.asc())
+            .limit(MAX_COMMITMENT_ROWS)
+            .all()
+        )
+        return [{"task": row.task, "time": row.time} for row in rows]
+    finally:
+        session.close()
+
+
+def _extract_schedule_id_from_action(payload_data: Dict[str, Any]) -> str:
+    """Extract schedule_id from block action value JSON."""
+    actions = payload_data.get("actions", [])
+    if not actions:
+        return ""
+
+    value = actions[0].get("value", "")
+    if not value:
+        return ""
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return ""
+    if isinstance(parsed, dict):
+        raw = parsed.get("schedule_id")
+        if isinstance(raw, str):
+            return raw
+    return ""
+
+
+def _open_slack_modal(trigger_id: str, view: Dict[str, Any]) -> tuple[bool, str]:
+    """Open a modal using Slack views.open API."""
+    bot_token = os.getenv("SLACK_BOT_USER_OAUTH_TOKEN")
+    if not bot_token:
+        return False, "SLACK_BOT_USER_OAUTH_TOKEN is not configured"
+
+    try:
+        response = requests.post(
+            "https://slack.com/api/views.open",
+            headers={
+                "Authorization": f"Bearer {bot_token}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            json={
+                "trigger_id": trigger_id,
+                "view": view,
+            },
+            timeout=2.5,
+        )
+    except requests.RequestException as exc:
+        return False, f"views.open request failed: {exc}"
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return False, f"views.open non-JSON response: status={response.status_code}"
+
+    if not payload.get("ok"):
+        error = payload.get("error", "views.open failed")
+        details = payload.get("response_metadata", {}).get("messages", [])
+        if details:
+            return False, f"{error} ({'; '.join(details)})"
+        return False, error
+
+    return True, "ok"
+
+
+async def process_plan_open_modal(payload_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handle plan_open_modal button and open plan input modal via views.open.
+    """
+    from backend.slack_ui import plan_input_modal
+
+    trigger_id = payload_data.get("trigger_id", "")
+    user_id = payload_data.get("user", {}).get("id", "")
+    channel_id = payload_data.get("container", {}).get("channel_id", "")
+    schedule_id = _extract_schedule_id_from_action(payload_data)
+
+    if not trigger_id:
+        print(f"[{datetime.now()}] plan_open_modal failed: missing trigger_id")
+        # Ack the action to avoid Slack client error; modal cannot be opened without trigger_id.
+        return {"status": "success"}
+
+    commitments = _load_active_commitments_for_user(user_id)
+    modal_view = plan_input_modal(commitments)
+    metadata = {
+        "user_id": user_id,
+        "channel_id": channel_id,
+    }
+    if schedule_id:
+        metadata["schedule_id"] = schedule_id
+    modal_view["private_metadata"] = json.dumps(metadata, ensure_ascii=False)
+
+    ok, reason = await asyncio.to_thread(_open_slack_modal, trigger_id, modal_view)
+    if not ok:
+        print(f"[{datetime.now()}] plan_open_modal views.open failed: {reason}")
+    else:
+        print(
+            f"[{datetime.now()}] plan_open_modal views.open succeeded: "
+            f"user_id={user_id} schedule_id={schedule_id}"
+        )
+
+    # Ack block_actions regardless; modal opening is handled via Web API.
+    return {"status": "success"}
+
+
 async def _apply_modal_update(
     view: Dict[str, Any], updated_view: Dict[str, Any], action_name: str
 ) -> Dict[str, Any]:

@@ -60,6 +60,25 @@ class TestPunishmentWorker:
         assert len(schedules) == 1
 
     @pytest.mark.asyncio
+    async def test_bootstrap_skips_when_today_plan_already_exists(
+        self, v3_db_session, v3_test_data_factory
+    ):
+        """同日のplanが既にある場合は初回planを登録しないこと"""
+        v3_test_data_factory.create_commitment(task="朝のタスク", time="07:00:00")
+        v3_test_data_factory.create_schedule(
+            event_type=EventType.PLAN,
+            run_at=datetime.now() - timedelta(hours=1),
+            state=ScheduleState.DONE,
+        )
+
+        worker = PunishmentWorker(v3_db_session)
+        created_id = await worker.ensure_initial_plan_schedule()
+
+        assert created_id is None
+        schedules = v3_db_session.query(Schedule).all()
+        assert len(schedules) == 1
+
+    @pytest.mark.asyncio
     async def test_bootstrap_skips_when_only_inactive_commitments(
         self, v3_db_session, v3_test_data_factory
     ):
@@ -79,7 +98,7 @@ class TestPunishmentWorker:
 
     @pytest.mark.asyncio
     async def test_process_schedule_plan_event(self, v3_db_session, v3_test_data_factory):
-        """planイベントを処理できること"""
+        """planイベントは処理後もprocessingで待機すること"""
         schedule = v3_test_data_factory.create_schedule(
             run_at=datetime.now() - timedelta(minutes=1),
             state=ScheduleState.PENDING
@@ -89,7 +108,7 @@ class TestPunishmentWorker:
         with patch.object(worker, "execute_script"):
             await worker.process_schedule(schedule)
 
-        assert schedule.state == ScheduleState.DONE
+        assert schedule.state == ScheduleState.PROCESSING
 
     @pytest.mark.asyncio
     async def test_process_schedule_remind_event(self, v3_db_session, v3_test_data_factory):
