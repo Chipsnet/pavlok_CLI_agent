@@ -1,9 +1,49 @@
 """Command API Handlers"""
-from fastapi import Request
-from typing import Dict, Any
+import asyncio
+import os
+from datetime import datetime
+from typing import Any, Dict
+
+import requests
 
 
-async def process_base_commit(request: Request) -> Dict[str, Any]:
+def _open_slack_modal(trigger_id: str, view: Dict[str, Any]) -> tuple[bool, str]:
+    """
+    Open a modal using Slack views.open API.
+    Returns (ok, reason).
+    """
+    bot_token = os.getenv("SLACK_BOT_USER_OAUTH_TOKEN")
+    if not bot_token:
+        return False, "SLACK_BOT_USER_OAUTH_TOKEN is not configured"
+
+    try:
+        response = requests.post(
+            "https://slack.com/api/views.open",
+            headers={
+                "Authorization": f"Bearer {bot_token}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            json={
+                "trigger_id": trigger_id,
+                "view": view,
+            },
+            timeout=2.5,
+        )
+    except requests.RequestException as exc:
+        return False, f"views.open request failed: {exc}"
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return False, f"views.open non-JSON response: status={response.status_code}"
+
+    if not payload.get("ok"):
+        return False, payload.get("error", "views.open failed")
+
+    return True, "ok"
+
+
+async def process_base_commit(request) -> Dict[str, Any]:
     """
     ベースコミットコマンド処理
 
@@ -15,18 +55,62 @@ async def process_base_commit(request: Request) -> Dict[str, Any]:
     """
     from backend.slack_ui import base_commit_modal
 
-    # TODO: Implement actual base commit processing with database
-    # For now, return empty modal data
     modal_data = base_commit_modal([])
+    trigger_id = request.get("trigger_id") if hasattr(request, "get") else None
 
-    # Return blocks directly for API response
+    if trigger_id:
+        ok, reason = await asyncio.to_thread(_open_slack_modal, trigger_id, modal_data)
+        if ok:
+            print(f"[{datetime.now()}] views.open succeeded")
+            # Slash command response must be a valid command response.
+            return {
+                "status": "success",
+                "response_type": "ephemeral",
+                "text": "コミットメント管理モーダルを開きました。",
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "📋 コミットメント管理モーダルを開きました。",
+                        },
+                    }
+                ],
+            }
+        return {
+            "status": "success",
+            "response_type": "ephemeral",
+            "text": f"モーダルを開けませんでした: {reason}",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f":warning: モーダルを開けませんでした: {reason}",
+                    },
+                }
+            ],
+        }
+        
+    print(f"[{datetime.now()}] views.open skipped: missing trigger_id")
+
     return {
         "status": "success",
-        "blocks": [{"type": "modal", "view": modal_data}]
+        "response_type": "ephemeral",
+        "text": "trigger_id が取得できないためモーダルを開けませんでした。再実行してください。",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": ":warning: trigger_id が取得できないためモーダルを開けませんでした。再実行してください。",
+                },
+            }
+        ],
     }
 
 
-async def process_stop(request: Request) -> Dict[str, Any]:
+async def process_stop(request) -> Dict[str, Any]:
     """
     停止コマンド処理
 
@@ -38,16 +122,16 @@ async def process_stop(request: Request) -> Dict[str, Any]:
     """
     from backend.slack_ui import stop_notification
 
-    # TODO: Implement actual stop processing
     blocks = stop_notification()
     return {
         "status": "success",
-        "detail": "鬼コーチを停止しました",
-        "blocks": blocks
+        "response_type": "ephemeral",
+        "text": "鬼コーチを停止しました",
+        "blocks": blocks,
     }
 
 
-async def process_restart(request: Request) -> Dict[str, Any]:
+async def process_restart(request) -> Dict[str, Any]:
     """
     再開コマンド処理
 
@@ -59,16 +143,16 @@ async def process_restart(request: Request) -> Dict[str, Any]:
     """
     from backend.slack_ui import restart_notification
 
-    # TODO: Implement actual restart processing
     blocks = restart_notification()
     return {
         "status": "success",
-        "detail": "鬼コーチを再開しました",
-        "blocks": blocks
+        "response_type": "ephemeral",
+        "text": "鬼コーチを再開しました",
+        "blocks": blocks,
     }
 
 
-async def process_config(request: Request, config_data: Dict[str, Any] = None) -> Dict[str, Any]:
+async def process_config(request, config_data: Dict[str, Any] = None) -> Dict[str, Any]:
     """
     設定コマンド処理
 
@@ -84,15 +168,19 @@ async def process_config(request: Request, config_data: Dict[str, Any] = None) -
     if method == "GET":
         return {
             "status": "success",
+            "response_type": "ephemeral",
+            "text": "現在の設定を表示します。",
             "data": {"configurations": {}}
         }
     elif method == "POST" and config_data:
         return {
             "status": "success",
-            "detail": "設定を更新しました",
+            "response_type": "ephemeral",
+            "text": "設定を更新しました",
             "data": config_data
         }
     return {
         "status": "success",
-        "detail": "設定処理完了"
+        "response_type": "ephemeral",
+        "text": "設定処理完了"
     }
