@@ -895,7 +895,7 @@ async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, A
     }
     now = datetime.now()
     thread_ts = ""
-    pending_deleted = 0
+    pending_canceled = 0
 
     session = _get_session()
     try:
@@ -914,14 +914,20 @@ async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, A
                 opened_plan_schedule.state = ScheduleState.DONE
                 opened_plan_schedule.updated_at = now
 
-        # DELETE phase: wash all pending schedules for this user.
-        pending_deleted = (
+        # Wash phase: mark all pending schedules for this user as canceled.
+        pending_canceled = (
             session.query(Schedule)
             .filter(
                 Schedule.user_id == user_id,
                 Schedule.state == ScheduleState.PENDING,
             )
-            .delete(synchronize_session=False)
+            .update(
+                {
+                    Schedule.state: ScheduleState.CANCELED,
+                    Schedule.updated_at: now,
+                },
+                synchronize_session=False,
+            )
         )
 
         # INSERT phase: reminders.
@@ -968,7 +974,7 @@ async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, A
 
     print(
         f"[{datetime.now()}] process_plan_modal_submit saved schedules: "
-        f"pending_deleted={pending_deleted} "
+        f"pending_canceled={pending_canceled} "
         f"user_id={user_id} remind_count={len(remind_rows_to_save)} "
         f"next_plan={next_plan['date']} {next_plan['time']} "
         f"db={_SESSION_DB_URL}"

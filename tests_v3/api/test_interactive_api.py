@@ -167,14 +167,19 @@ class TestInteractiveApi:
         refreshed_opened_plan = session.get(Schedule, opened_plan_id)
         assert refreshed_opened_plan is not None
         assert refreshed_opened_plan.state == ScheduleState.DONE
-        assert session.get(Schedule, old_pending_plan_id) is None
-        assert session.get(Schedule, old_pending_remind_id) is None
+        old_plan_row = session.get(Schedule, old_pending_plan_id)
+        old_remind_row = session.get(Schedule, old_pending_remind_id)
+        assert old_plan_row is not None
+        assert old_remind_row is not None
+        assert old_plan_row.state == ScheduleState.CANCELED
+        assert old_remind_row.state == ScheduleState.CANCELED
 
         remind_schedules = (
             session.query(Schedule)
             .filter(
                 Schedule.user_id == user_id,
                 Schedule.event_type == EventType.REMIND,
+                Schedule.state == ScheduleState.PENDING,
             )
             .all()
         )
@@ -190,10 +195,11 @@ class TestInteractiveApi:
             .filter(
                 Schedule.user_id == user_id,
                 Schedule.event_type == EventType.PLAN,
+                Schedule.state == ScheduleState.PENDING,
             )
             .all()
         )
-        assert len(next_plan_schedules) == 2
+        assert len(next_plan_schedules) == 1
         session.close()
 
     @pytest.mark.asyncio
