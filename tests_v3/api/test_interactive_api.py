@@ -5,9 +5,11 @@ from fastapi import Request, HTTPException, status
 from backend.api.interactive import (
     process_plan_submit,
     process_remind_response,
-    process_ignore_response
+    process_ignore_response,
+    process_commitment_add_row,
 )
 from backend.models import Schedule, ActionLog, ActionResult
+from backend.slack_ui import base_commit_modal
 
 
 @pytest.mark.asyncio
@@ -120,3 +122,56 @@ class TestInteractiveApi:
         result = await process_ignore_response(payload_data)
         assert result["status"] == "success"
         assert result.get("detail") == "やっぱり..."
+
+    @pytest.mark.asyncio
+    async def test_commitment_add_row_updates_modal(self):
+        modal = base_commit_modal([])
+        payload_data = {
+            "type": "block_actions",
+            "user": {"id": "U03JBULT484"},
+            "actions": [{"action_id": "commitment_add_row"}],
+            "view": {
+                **modal,
+                "state": {
+                    "values": {
+                        "commitment_1": {"task_1": {"type": "plain_text_input", "value": "朝の瞑想"}},
+                        "time_1": {"time_1": {"type": "timepicker", "selected_time": "07:00"}},
+                        "commitment_2": {"task_2": {"type": "plain_text_input", "value": ""}},
+                        "time_2": {"time_2": {"type": "timepicker", "selected_time": None}},
+                        "commitment_3": {"task_3": {"type": "plain_text_input", "value": ""}},
+                        "time_3": {"time_3": {"type": "timepicker", "selected_time": None}},
+                    }
+                },
+            },
+        }
+
+        result = await process_commitment_add_row(payload_data)
+        assert result["response_action"] == "update"
+        updated_view = result["view"]
+        task_blocks = [
+            b for b in updated_view["blocks"]
+            if b.get("block_id", "").startswith("commitment_")
+        ]
+        assert len(task_blocks) == 4
+
+    @pytest.mark.asyncio
+    async def test_commitment_add_row_stops_at_max(self):
+        commitments = [{"task": f"task-{i}", "time": "07:00"} for i in range(1, 11)]
+        modal = base_commit_modal(commitments)
+        payload_data = {
+            "type": "block_actions",
+            "user": {"id": "U03JBULT484"},
+            "actions": [{"action_id": "commitment_add_row"}],
+            "view": {
+                **modal,
+                "state": {"values": {}},
+            },
+        }
+
+        result = await process_commitment_add_row(payload_data)
+        updated_view = result["view"]
+        task_blocks = [
+            b for b in updated_view["blocks"]
+            if b.get("block_id", "").startswith("commitment_")
+        ]
+        assert len(task_blocks) == 10

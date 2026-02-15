@@ -1,6 +1,63 @@
 """Interactive API Handlers"""
-from fastapi import Request, HTTPException, status
 from typing import Dict, Any
+
+MAX_COMMITMENT_ROWS = 10
+
+
+def _current_commitments_from_view(view: Dict[str, Any]) -> list[dict[str, str]]:
+    """Extract current modal input values from Slack view payload."""
+    blocks = view.get("blocks", [])
+    state_values = view.get("state", {}).get("values", {})
+
+    row_count = sum(
+        1
+        for block in blocks
+        if str(block.get("block_id", "")).startswith("commitment_")
+    )
+    row_count = max(3, row_count)
+
+    commitments: list[dict[str, str]] = []
+    for idx in range(1, row_count + 1):
+        task = ""
+        selected_time = ""
+
+        task_block = state_values.get(f"commitment_{idx}", {})
+        task_input = task_block.get(f"task_{idx}", {})
+        if isinstance(task_input, dict):
+            task = task_input.get("value", "") or ""
+
+        time_block = state_values.get(f"time_{idx}", {})
+        time_input = time_block.get(f"time_{idx}", {})
+        if isinstance(time_input, dict):
+            selected_time = time_input.get("selected_time", "") or ""
+
+        commitments.append({"task": task, "time": selected_time})
+
+    return commitments
+
+
+async def process_commitment_add_row(payload_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handle "+ 追加" in base_commit modal by returning response_action=update.
+    """
+    from backend.slack_ui import base_commit_modal
+
+    view = payload_data.get("view", {})
+    commitments = _current_commitments_from_view(view)
+    if len(commitments) < MAX_COMMITMENT_ROWS:
+        commitments.append({"task": "", "time": ""})
+
+    updated_view = base_commit_modal(commitments)
+
+    # Keep metadata flags that may be set by previous view state.
+    for key in ("private_metadata", "clear_on_close", "notify_on_close", "external_id"):
+        if key in view:
+            updated_view[key] = view[key]
+
+    return {
+        "response_action": "update",
+        "view": updated_view,
+    }
 
 
 async def process_plan_submit(payload_data: Dict[str, Any]) -> Dict[str, Any]:
