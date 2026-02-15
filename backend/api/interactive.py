@@ -1,5 +1,10 @@
 """Interactive API Handlers"""
+import asyncio
+import os
+from datetime import datetime
 from typing import Dict, Any
+
+import requests
 
 MAX_COMMITMENT_ROWS = 10
 
@@ -38,7 +43,9 @@ def _current_commitments_from_view(view: Dict[str, Any]) -> list[dict[str, str]]
 
 async def process_commitment_add_row(payload_data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Handle "+ 追加" in base_commit modal by returning response_action=update.
+    Handle "+ 追加" in base_commit modal.
+    For block_actions in modals, we update the view via views.update API.
+    If view_id/token is unavailable, fall back to response_action=update.
     """
     from backend.slack_ui import base_commit_modal
 
@@ -54,9 +61,71 @@ async def process_commitment_add_row(payload_data: Dict[str, Any]) -> Dict[str, 
         if key in view:
             updated_view[key] = view[key]
 
+    view_id = view.get("id")
+    view_hash = view.get("hash")
+    bot_token = os.getenv("SLACK_BOT_USER_OAUTH_TOKEN")
+
+    # Best-effort fallback for local tests or environments without view_id/token.
+    if not view_id or not bot_token:
+        if not view_id:
+            print(f"[{datetime.now()}] commitment_add_row fallback: missing view_id")
+        if not bot_token:
+            print(
+                f"[{datetime.now()}] commitment_add_row fallback: "
+                "SLACK_BOT_USER_OAUTH_TOKEN is not configured"
+            )
+        return {
+            "response_action": "update",
+            "view": updated_view,
+        }
+
+    def _call_views_update() -> tuple[bool, str]:
+        payload: Dict[str, Any] = {
+            "view_id": view_id,
+            "view": updated_view,
+        }
+        if view_hash:
+            payload["hash"] = view_hash
+
+        try:
+            response = requests.post(
+                "https://slack.com/api/views.update",
+                headers={
+                    "Authorization": f"Bearer {bot_token}",
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+                json=payload,
+                timeout=2.5,
+            )
+        except requests.RequestException as exc:
+            return False, f"views.update request failed: {exc}"
+
+        try:
+            body = response.json()
+        except ValueError:
+            return False, f"views.update non-JSON response: status={response.status_code}"
+
+        if not body.get("ok"):
+            error = body.get("error", "views.update failed")
+            details = body.get("response_metadata", {}).get("messages", [])
+            if details:
+                return False, f"{error} ({'; '.join(details)})"
+            return False, error
+        return True, "ok"
+
+    ok, reason = await asyncio.to_thread(_call_views_update)
+    if not ok:
+        print(f"[{datetime.now()}] views.update failed: {reason}")
+        # Try a fallback response for resilience, though Slack may ignore this path for block_actions.
+        return {
+            "response_action": "update",
+            "view": updated_view,
+        }
+
+    print(f"[{datetime.now()}] views.update succeeded")
+    # Acknowledge block_actions. Modal update has already been done via Web API.
     return {
-        "response_action": "update",
-        "view": updated_view,
+        "status": "success",
     }
 
 
