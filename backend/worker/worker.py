@@ -7,9 +7,13 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from dotenv import load_dotenv
 
 
 logger = logging.getLogger(__name__)
+
+# Load local .env if present (without overriding real environment variables).
+load_dotenv()
 
 
 class PunishmentWorker:
@@ -28,12 +32,10 @@ class PunishmentWorker:
     def _resolve_bootstrap_user_id(self) -> Optional[str]:
         """
         Resolve user_id for initial plan bootstrap.
-        Priority:
-        1. Active commitments
-        2. Latest schedules history
-        3. DEFAULT_USER_ID / SLACK_USER_ID env
+        Rule:
+        - Only users who have active commitments are eligible.
         """
-        from backend.models import Commitment, Schedule
+        from backend.models import Commitment
 
         commitment_row = (
             self.session.query(Commitment.user_id)
@@ -44,16 +46,7 @@ class PunishmentWorker:
         if commitment_row and commitment_row[0]:
             return str(commitment_row[0])
 
-        schedule_row = (
-            self.session.query(Schedule.user_id)
-            .order_by(Schedule.updated_at.desc())
-            .first()
-        )
-        if schedule_row and schedule_row[0]:
-            return str(schedule_row[0])
-
-        fallback = os.getenv("DEFAULT_USER_ID") or os.getenv("SLACK_USER_ID")
-        return fallback or None
+        return None
 
     async def ensure_initial_plan_schedule(self) -> Optional[str]:
         """
@@ -79,7 +72,8 @@ class PunishmentWorker:
         user_id = self._resolve_bootstrap_user_id()
         if not user_id:
             logger.warning(
-                "Bootstrap skipped: cannot resolve user_id for initial plan schedule"
+                "Bootstrap skipped: no active commitments found. "
+                "Run /base_commit to create active commitments first."
             )
             return None
 

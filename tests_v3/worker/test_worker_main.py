@@ -60,6 +60,24 @@ class TestPunishmentWorker:
         assert len(schedules) == 1
 
     @pytest.mark.asyncio
+    async def test_bootstrap_skips_when_only_inactive_commitments(
+        self, v3_db_session, v3_test_data_factory
+    ):
+        """active=falseしかない場合は初回planを登録しないこと"""
+        v3_test_data_factory.create_commitment(
+            task="inactive task",
+            time="09:00:00",
+            active=False,
+        )
+
+        worker = PunishmentWorker(v3_db_session)
+        created_id = await worker.ensure_initial_plan_schedule()
+
+        assert created_id is None
+        schedules = v3_db_session.query(Schedule).all()
+        assert len(schedules) == 0
+
+    @pytest.mark.asyncio
     async def test_process_schedule_plan_event(self, v3_db_session, v3_test_data_factory):
         """planイベントを処理できること"""
         schedule = v3_test_data_factory.create_schedule(
