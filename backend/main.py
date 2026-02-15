@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 from .api import (
     process_base_commit, process_stop, process_restart, process_config,
-    process_plan_submit, process_remind_response, process_ignore_response,
+    process_plan_submit, process_plan_modal_submit, process_remind_response, process_ignore_response,
     process_plan_open_modal, process_commitment_add_row, process_commitment_remove_row,
 )
 from .api.signature import verify_slack_signature
@@ -210,6 +210,8 @@ async def route_interactive_payload(payload_data):
         callback_id = payload_data.get("view", {}).get("callback_id")
         if callback_id in {"commitment_submit", "base_commit_submit"}:
             return await process_plan_submit(payload_data)
+        if callback_id == "plan_submit":
+            return await process_plan_modal_submit(payload_data)
         if callback_id == "config_submit":
             return await process_config(payload_data)
     elif action_type == "block_actions":

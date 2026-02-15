@@ -5,6 +5,7 @@ from .command import process_base_commit, process_stop, process_restart, process
 from .config import get_configurations, upsert_configuration, reset_configuration
 from .interactive import (
     process_plan_submit,
+    process_plan_modal_submit,
     process_remind_response,
     process_ignore_response,
     process_plan_open_modal,

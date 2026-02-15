@@ -2,14 +2,14 @@
 import asyncio
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, time as dt_time
 from typing import Dict, Any
 
 import requests
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from backend.models import Commitment
+from backend.models import Commitment, Schedule, ScheduleState, EventType
 
 MAX_COMMITMENT_ROWS = 10
 MIN_COMMITMENT_ROWS = 3
@@ -53,7 +53,7 @@ def _extract_submission_metadata(payload_data: Dict[str, Any]) -> dict[str, str]
         except (TypeError, json.JSONDecodeError):
             parsed = {}
         if isinstance(parsed, dict):
-            for key in ("channel_id", "user_id", "response_url"):
+            for key in ("channel_id", "user_id", "response_url", "schedule_id"):
                 value = parsed.get(key)
                 if isinstance(value, str) and value:
                     metadata[key] = value
@@ -220,6 +220,114 @@ async def _notify_commitment_saved(
         )
     else:
         print(f"[{datetime.now()}] post-submit notification failed: {reason}")
+
+
+def _to_relative_day_label(date_value: str) -> str:
+    """Convert relative date token to Japanese display label."""
+    if date_value == "tomorrow":
+        return "明日"
+    return "今日"
+
+
+async def _notify_plan_saved(
+    channel_id: str,
+    user_id: str,
+    scheduled_tasks: list[dict[str, str]],
+    next_plan: dict[str, str],
+    thread_ts: str = "",
+) -> None:
+    """Post plan submit completion message to Slack."""
+    bot_token = os.getenv("SLACK_BOT_USER_OAUTH_TOKEN")
+    if not bot_token:
+        print(
+            f"[{datetime.now()}] skip plan-submit notification: "
+            "SLACK_BOT_USER_OAUTH_TOKEN is not configured"
+        )
+        return
+
+    from backend.slack_ui import plan_complete_notification
+
+    visible_tasks = scheduled_tasks
+    if not visible_tasks:
+        visible_tasks = [
+            {"task": "実行タスクなし", "date": "今日", "time": "--:--"}
+        ]
+
+    text = f"<@{user_id}> 24時間のplanを登録しました。"
+    blocks = plan_complete_notification(visible_tasks, next_plan)
+    headers = {
+        "Authorization": f"Bearer {bot_token}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+
+    def _post() -> tuple[bool, str]:
+        def _open_dm_channel() -> tuple[str, str]:
+            try:
+                open_resp = requests.post(
+                    "https://slack.com/api/conversations.open",
+                    headers=headers,
+                    json={"users": user_id},
+                    timeout=2.5,
+                )
+                open_body = open_resp.json()
+            except (requests.RequestException, ValueError) as exc:
+                return "", f"conversations.open failed: {exc}"
+
+            if not open_body.get("ok"):
+                return "", f"conversations.open error: {open_body.get('error')}"
+
+            dm_channel = open_body.get("channel", {}).get("id", "")
+            if not dm_channel:
+                return "", "conversations.open returned no channel id"
+            return dm_channel, "ok"
+
+        def _post_message(target_channel: str, post_thread_ts: str = "") -> tuple[bool, str]:
+            payload: Dict[str, Any] = {
+                "channel": target_channel,
+                "text": text,
+                "blocks": blocks,
+                "unfurl_links": False,
+                "unfurl_media": False,
+            }
+            if post_thread_ts:
+                payload["thread_ts"] = post_thread_ts
+
+            try:
+                post_resp = requests.post(
+                    "https://slack.com/api/chat.postMessage",
+                    headers=headers,
+                    json=payload,
+                    timeout=2.5,
+                )
+                post_body = post_resp.json()
+            except (requests.RequestException, ValueError) as exc:
+                return False, f"chat.postMessage failed: {exc}"
+
+            if not post_body.get("ok"):
+                return False, f"chat.postMessage error: {post_body.get('error')}"
+            return True, "ok"
+
+        target_channel = channel_id
+        if target_channel:
+            ok, reason = _post_message(target_channel, thread_ts)
+            if ok:
+                return True, "ok"
+            if "not_in_channel" not in reason and "channel_not_found" not in reason:
+                return False, reason
+
+        dm_channel, dm_reason = _open_dm_channel()
+        if not dm_channel:
+            return False, dm_reason
+        return _post_message(dm_channel)
+
+    ok, reason = await asyncio.to_thread(_post)
+    if ok:
+        print(
+            f"[{datetime.now()}] plan-submit notification sent: "
+            f"user_id={user_id} channel={channel_id or '(dm)'} tasks={len(scheduled_tasks)}"
+        )
+    else:
+        print(f"[{datetime.now()}] plan-submit notification failed: {reason}")
 
 
 def _current_commitments_from_view(view: Dict[str, Any]) -> list[dict[str, str]]:
@@ -581,6 +689,321 @@ async def process_plan_submit(payload_data: Dict[str, Any]) -> Dict[str, Any]:
 
     # Slack view_submission success response must be a modal response payload.
     # Keep it minimal to avoid "invalid_command_response"/modal close failures.
+    return {
+        "response_action": "clear",
+    }
+
+
+def _extract_plan_task_indices(state_values: Dict[str, Any]) -> list[int]:
+    """Extract task indices from plan modal state keys like task_1_date."""
+    indices: set[int] = set()
+    for block_id in state_values.keys():
+        parts = str(block_id).split("_")
+        if len(parts) < 3:
+            continue
+        if parts[0] != "task":
+            continue
+        if not parts[1].isdigit():
+            continue
+        if parts[2] not in {"date", "time", "skip"}:
+            continue
+        indices.add(int(parts[1]))
+    return sorted(indices)
+
+
+def _extract_static_select_value(
+    state_values: Dict[str, Any],
+    block_id: str,
+    action_id: str,
+) -> str:
+    """Read selected_option.value from a static_select input."""
+    payload = state_values.get(block_id, {}).get(action_id, {})
+    if not isinstance(payload, dict):
+        return ""
+    option = payload.get("selected_option", {})
+    if not isinstance(option, dict):
+        return ""
+    value = option.get("value", "")
+    return value if isinstance(value, str) else ""
+
+
+def _extract_timepicker_value(
+    state_values: Dict[str, Any],
+    block_id: str,
+    action_id: str,
+) -> str:
+    """Read selected_time from a timepicker input."""
+    payload = state_values.get(block_id, {}).get(action_id, {})
+    if not isinstance(payload, dict):
+        return ""
+    selected_time = payload.get("selected_time", "")
+    return selected_time if isinstance(selected_time, str) else ""
+
+
+def _extract_skip_flag(
+    state_values: Dict[str, Any],
+    block_id: str,
+    action_id: str,
+) -> bool:
+    """Read skip checkbox state."""
+    payload = state_values.get(block_id, {}).get(action_id, {})
+    if not isinstance(payload, dict):
+        return False
+    options = payload.get("selected_options", [])
+    if not isinstance(options, list):
+        return False
+    for option in options:
+        if isinstance(option, dict) and option.get("value") == "skip":
+            return True
+    return False
+
+
+def _resolve_relative_datetime(date_value: str, normalized_time: str) -> datetime:
+    """Convert today/tomorrow + HH:MM:SS to absolute datetime."""
+    now = datetime.now()
+    base_date = now.date()
+    if date_value == "tomorrow":
+        base_date = base_date + timedelta(days=1)
+
+    hh, mm, ss = normalized_time.split(":")
+    return datetime.combine(
+        base_date,
+        dt_time(hour=int(hh), minute=int(mm), second=int(ss)),
+    )
+
+
+def _parse_plan_submission_state(state_values: Dict[str, Any]) -> tuple[
+    list[dict[str, Any]],
+    dict[str, str],
+    Dict[str, str],
+]:
+    """
+    Parse plan modal submission payload.
+    Returns:
+    - task rows [{index, date, time, skip}]
+    - next_plan {date, time}
+    - validation errors keyed by block_id
+    """
+    errors: Dict[str, str] = {}
+    task_rows: list[dict[str, Any]] = []
+
+    for idx in _extract_plan_task_indices(state_values):
+        date_value = _extract_static_select_value(
+            state_values, f"task_{idx}_date", "date"
+        )
+        time_value = _extract_timepicker_value(
+            state_values, f"task_{idx}_time", "time"
+        )
+        skip = _extract_skip_flag(state_values, f"task_{idx}_skip", "skip")
+        normalized_time = _normalize_time(time_value)
+
+        if date_value not in {"today", "tomorrow"}:
+            errors[f"task_{idx}_date"] = "実行日を選択してください。"
+        if not normalized_time:
+            errors[f"task_{idx}_time"] = "実行時間を選択してください。"
+
+        task_rows.append(
+            {
+                "index": idx,
+                "date": date_value,
+                "time": normalized_time,
+                "skip": skip,
+            }
+        )
+
+    next_plan_date = _extract_static_select_value(
+        state_values,
+        "next_plan_date",
+        "date",
+    )
+    next_plan_time = _normalize_time(
+        _extract_timepicker_value(state_values, "next_plan_time", "time")
+    )
+
+    if next_plan_date not in {"today", "tomorrow"}:
+        errors["next_plan_date"] = "次回計画の実行日を選択してください。"
+    if not next_plan_time:
+        errors["next_plan_time"] = "次回計画の実行時間を選択してください。"
+
+    return task_rows, {"date": next_plan_date, "time": next_plan_time}, errors
+
+
+def _upsert_schedule_for_day(
+    session,
+    *,
+    user_id: str,
+    event_type: EventType,
+    run_at: datetime,
+    comment: str = "",
+) -> None:
+    """Upsert one schedule per user/day/event_type (compatible with uix_user_date_event)."""
+    day_start = datetime.combine(run_at.date(), dt_time(hour=0, minute=0, second=0))
+    day_end = day_start + timedelta(days=1)
+    existing = (
+        session.query(Schedule)
+        .filter(
+            Schedule.user_id == user_id,
+            Schedule.event_type == event_type,
+            Schedule.run_at >= day_start,
+            Schedule.run_at < day_end,
+        )
+        .order_by(Schedule.created_at.asc())
+        .first()
+    )
+
+    if existing:
+        existing.run_at = run_at
+        existing.state = ScheduleState.PENDING
+        existing.retry_count = 0
+        existing.thread_ts = None
+        if comment:
+            existing.comment = comment
+        return
+
+    session.add(
+        Schedule(
+            user_id=user_id,
+            event_type=event_type,
+            run_at=run_at,
+            state=ScheduleState.PENDING,
+            retry_count=0,
+            comment=comment or None,
+        )
+    )
+
+
+async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handle plan modal (callback_id=plan_submit):
+    - mark opened plan schedule done
+    - register remind schedules for selected tasks (non-skip)
+    - register next plan schedule
+    """
+    user_id = payload_data.get("user", {}).get("id", "")
+    view = payload_data.get("view", {})
+    state_values = view.get("state", {}).get("values", {})
+
+    if not user_id:
+        return {
+            "response_action": "errors",
+            "errors": {"next_plan_date": "ユーザー情報を取得できませんでした。"},
+        }
+
+    task_rows, next_plan, validation_errors = _parse_plan_submission_state(state_values)
+    if validation_errors:
+        return {
+            "response_action": "errors",
+            "errors": validation_errors,
+        }
+
+    active_commitments = _load_active_commitments_for_user(user_id)
+
+    # Select one remind per day due DB unique index (uix_user_date_event).
+    remind_candidates_by_day: dict[Any, dict[str, Any]] = {}
+    scheduled_tasks_for_message: list[dict[str, str]] = []
+    for row in task_rows:
+        if row["skip"]:
+            continue
+        run_at = _resolve_relative_datetime(row["date"], row["time"])
+        commitment_idx = row["index"] - 1
+        task_name = (
+            active_commitments[commitment_idx]["task"]
+            if 0 <= commitment_idx < len(active_commitments)
+            else f"タスク{row['index']}"
+        )
+        day_key = run_at.date()
+        existing = remind_candidates_by_day.get(day_key)
+        candidate = {"run_at": run_at, "task": task_name}
+        if existing is None or run_at < existing["run_at"]:
+            remind_candidates_by_day[day_key] = candidate
+
+        scheduled_tasks_for_message.append(
+            {
+                "task": task_name,
+                "date": _to_relative_day_label(row["date"]),
+                "time": row["time"][:5],
+            }
+        )
+
+    metadata = _extract_submission_metadata(payload_data)
+    schedule_id = metadata.get("schedule_id", "")
+    channel_id = metadata.get("channel_id", "")
+    next_plan_for_message = {
+        "date": _to_relative_day_label(next_plan["date"]),
+        "time": next_plan["time"][:5],
+    }
+    now = datetime.now()
+    thread_ts = ""
+
+    session = _get_session()
+    try:
+        if schedule_id:
+            opened_plan_schedule = (
+                session.query(Schedule)
+                .filter(
+                    Schedule.id == schedule_id,
+                    Schedule.user_id == user_id,
+                    Schedule.event_type == EventType.PLAN,
+                )
+                .first()
+            )
+            if opened_plan_schedule:
+                thread_ts = opened_plan_schedule.thread_ts or ""
+                opened_plan_schedule.state = ScheduleState.DONE
+                opened_plan_schedule.updated_at = now
+
+        for candidate in remind_candidates_by_day.values():
+            _upsert_schedule_for_day(
+                session,
+                user_id=user_id,
+                event_type=EventType.REMIND,
+                run_at=candidate["run_at"],
+                comment=candidate["task"],
+            )
+
+        next_plan_run_at = _resolve_relative_datetime(
+            next_plan["date"],
+            next_plan["time"],
+        )
+        _upsert_schedule_for_day(
+            session,
+            user_id=user_id,
+            event_type=EventType.PLAN,
+            run_at=next_plan_run_at,
+            comment="next plan",
+        )
+
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        print(f"[{datetime.now()}] process_plan_modal_submit DB error: {exc}")
+        return {
+            "response_action": "errors",
+            "errors": {
+                "next_plan_time": "保存に失敗しました。もう一度試してください。"
+            },
+        }
+    finally:
+        session.close()
+
+    print(
+        f"[{datetime.now()}] process_plan_modal_submit saved schedules: "
+        f"user_id={user_id} remind_days={len(remind_candidates_by_day)} "
+        f"next_plan={next_plan['date']} {next_plan['time']} "
+        f"db={_SESSION_DB_URL}"
+    )
+
+    # Notify user in channel/thread without delaying modal close response.
+    asyncio.create_task(
+        _notify_plan_saved(
+            channel_id=channel_id,
+            user_id=user_id,
+            scheduled_tasks=scheduled_tasks_for_message,
+            next_plan=next_plan_for_message,
+            thread_ts=thread_ts,
+        )
+    )
+
     return {
         "response_action": "clear",
     }

@@ -1,15 +1,20 @@
 # v0.3 Interactive API Tests
+import json
+from datetime import datetime, timedelta
+
 import pytest
-from unittest.mock import MagicMock
-from fastapi import Request, HTTPException, status
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
 from backend.api.interactive import (
     process_plan_submit,
+    process_plan_modal_submit,
     process_remind_response,
     process_ignore_response,
     process_commitment_add_row,
     process_commitment_remove_row,
 )
-from backend.models import Schedule, ActionLog, ActionResult
+from backend.models import Base, Schedule, Commitment, ActionLog, ActionResult, EventType, ScheduleState
 from backend.slack_ui import base_commit_modal
 
 
@@ -38,6 +43,134 @@ class TestInteractiveApi:
 
         result = await process_plan_submit(payload_data)
         assert result["response_action"] == "clear"
+
+    @pytest.mark.asyncio
+    async def test_plan_modal_submit_saves_schedules_and_returns_clear(self, monkeypatch, tmp_path):
+        db_path = tmp_path / "plan_submit.sqlite3"
+        database_url = f"sqlite:///{db_path}"
+        monkeypatch.setenv("DATABASE_URL", database_url)
+        monkeypatch.setattr("backend.api.interactive._SESSION_FACTORY", None)
+        monkeypatch.setattr("backend.api.interactive._SESSION_DB_URL", None)
+
+        engine = create_engine(
+            database_url,
+            connect_args={"check_same_thread": False},
+        )
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine)
+
+        session = Session()
+        user_id = "U03JBULT484"
+        opened_plan = Schedule(
+            user_id=user_id,
+            event_type=EventType.PLAN,
+            run_at=datetime.now() - timedelta(minutes=1),
+            state=ScheduleState.PROCESSING,
+        )
+        session.add(opened_plan)
+        session.add_all(
+            [
+                Commitment(user_id=user_id, task="朝やる", time="06:00:00", active=True),
+                Commitment(user_id=user_id, task="昼やる", time="12:00:00", active=True),
+            ]
+        )
+        session.commit()
+        opened_plan_id = opened_plan.id
+        session.close()
+
+        payload_data = {
+            "type": "view_submission",
+            "user": {"id": user_id},
+            "view": {
+                "callback_id": "plan_submit",
+                "private_metadata": json.dumps(
+                    {
+                        "user_id": user_id,
+                        "schedule_id": opened_plan_id,
+                        "channel_id": "C123456",
+                    }
+                ),
+                "state": {
+                    "values": {
+                        "task_1_date": {
+                            "date": {
+                                "selected_option": {
+                                    "value": "today",
+                                }
+                            }
+                        },
+                        "task_1_time": {
+                            "time": {
+                                "selected_time": "06:00",
+                            }
+                        },
+                        "task_1_skip": {
+                            "skip": {
+                                "selected_options": [],
+                            }
+                        },
+                        "task_2_date": {
+                            "date": {
+                                "selected_option": {
+                                    "value": "tomorrow",
+                                }
+                            }
+                        },
+                        "task_2_time": {
+                            "time": {
+                                "selected_time": "12:00",
+                            }
+                        },
+                        "task_2_skip": {
+                            "skip": {
+                                "selected_options": [],
+                            }
+                        },
+                        "next_plan_date": {
+                            "date": {
+                                "selected_option": {
+                                    "value": "tomorrow",
+                                }
+                            }
+                        },
+                        "next_plan_time": {
+                            "time": {
+                                "selected_time": "07:00",
+                            }
+                        },
+                    }
+                },
+            },
+        }
+
+        result = await process_plan_modal_submit(payload_data)
+        assert result["response_action"] == "clear"
+
+        session = Session()
+        refreshed_opened_plan = session.get(Schedule, opened_plan_id)
+        assert refreshed_opened_plan is not None
+        assert refreshed_opened_plan.state == ScheduleState.DONE
+
+        remind_schedules = (
+            session.query(Schedule)
+            .filter(
+                Schedule.user_id == user_id,
+                Schedule.event_type == EventType.REMIND,
+            )
+            .all()
+        )
+        assert len(remind_schedules) == 2
+
+        next_plan_schedules = (
+            session.query(Schedule)
+            .filter(
+                Schedule.user_id == user_id,
+                Schedule.event_type == EventType.PLAN,
+            )
+            .all()
+        )
+        assert len(next_plan_schedules) == 2
+        session.close()
 
     @pytest.mark.asyncio
     async def test_remind_response_yes(self, v3_db_session, v3_test_data_factory):
