@@ -254,7 +254,16 @@ async def _notify_plan_saved(
         ]
 
     text = f"<@{user_id}> 24時間のplanを登録しました。"
-    blocks = plan_complete_notification(visible_tasks, next_plan)
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": text,
+            },
+        },
+        *plan_complete_notification(visible_tasks, next_plan),
+    ]
     headers = {
         "Authorization": f"Bearer {bot_token}",
         "Content-Type": "application/json; charset=utf-8",
@@ -286,6 +295,7 @@ async def _notify_plan_saved(
                 "channel": target_channel,
                 "text": text,
                 "blocks": blocks,
+                "link_names": True,
                 "unfurl_links": False,
                 "unfurl_media": False,
             }
