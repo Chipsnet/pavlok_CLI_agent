@@ -68,6 +68,21 @@ class TestInteractiveApi:
             state=ScheduleState.PROCESSING,
         )
         session.add(opened_plan)
+        old_pending_plan = Schedule(
+            user_id=user_id,
+            event_type=EventType.PLAN,
+            run_at=datetime.now() + timedelta(hours=10),
+            state=ScheduleState.PENDING,
+            comment="old next plan",
+        )
+        old_pending_remind = Schedule(
+            user_id=user_id,
+            event_type=EventType.REMIND,
+            run_at=datetime.now() + timedelta(hours=2),
+            state=ScheduleState.PENDING,
+            comment="old remind",
+        )
+        session.add_all([old_pending_plan, old_pending_remind])
         session.add_all(
             [
                 Commitment(user_id=user_id, task="朝やる", time="06:00:00", active=True),
@@ -76,6 +91,8 @@ class TestInteractiveApi:
         )
         session.commit()
         opened_plan_id = opened_plan.id
+        old_pending_plan_id = old_pending_plan.id
+        old_pending_remind_id = old_pending_remind.id
         session.close()
 
         payload_data = {
@@ -150,6 +167,8 @@ class TestInteractiveApi:
         refreshed_opened_plan = session.get(Schedule, opened_plan_id)
         assert refreshed_opened_plan is not None
         assert refreshed_opened_plan.state == ScheduleState.DONE
+        assert session.get(Schedule, old_pending_plan_id) is None
+        assert session.get(Schedule, old_pending_remind_id) is None
 
         remind_schedules = (
             session.query(Schedule)

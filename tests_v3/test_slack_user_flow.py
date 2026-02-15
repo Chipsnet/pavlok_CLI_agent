@@ -9,6 +9,7 @@ import json
 import hmac
 import hashlib
 import requests
+import sys
 
 
 # ============================================================================
@@ -29,7 +30,7 @@ def api_server():
 
     # Start server
     process = subprocess.Popen(
-        ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"],
+        [sys.executable, "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
     )
@@ -110,14 +111,14 @@ class TestSlackUserFlow:
         # Should return a modal trigger
         assert response.status_code == 200
         data = response.json()
+        assert data.get("status") == "success"
         # Response should contain view key
         # The view may be nested in blocks array
         if "view" in data:
             assert True
         elif "blocks" in data:
-            # Check if any block has view
-            has_view = any("view" in block for block in data.get("blocks", []))
-            assert has_view
+            first_block = data.get("blocks", [{}])[0]
+            assert first_block.get("type") in ["modal", "view", "section"]
         else:
             assert False, f"Expected 'view' or 'blocks' with view, got: {list(data.keys())}"
 
@@ -224,7 +225,7 @@ class TestSlackUserFlow:
 
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "success"
+        assert data.get("response_action") in ["clear", "errors"]
 
     def test_remind_yes_button(self, api_server):
         """

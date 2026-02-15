@@ -838,91 +838,6 @@ def _parse_plan_submission_state(state_values: Dict[str, Any]) -> tuple[
     return task_rows, {"date": next_plan_date, "time": next_plan_time}, errors
 
 
-def _upsert_plan_schedule_for_day(
-    session,
-    *,
-    user_id: str,
-    run_at: datetime,
-    comment: str = "",
-) -> None:
-    """Upsert one PLAN schedule per user/day."""
-    day_start = datetime.combine(run_at.date(), dt_time(hour=0, minute=0, second=0))
-    day_end = day_start + timedelta(days=1)
-    existing = (
-        session.query(Schedule)
-        .filter(
-            Schedule.user_id == user_id,
-            Schedule.event_type == EventType.PLAN,
-            Schedule.run_at >= day_start,
-            Schedule.run_at < day_end,
-        )
-        .order_by(Schedule.created_at.asc())
-        .first()
-    )
-
-    if existing:
-        existing.run_at = run_at
-        existing.state = ScheduleState.PENDING
-        existing.retry_count = 0
-        existing.thread_ts = None
-        if comment:
-            existing.comment = comment
-        return
-
-    session.add(
-        Schedule(
-            user_id=user_id,
-            event_type=EventType.PLAN,
-            run_at=run_at,
-            state=ScheduleState.PENDING,
-            retry_count=0,
-            comment=comment or None,
-        )
-    )
-
-
-def _replace_remind_schedules_for_days(
-    session,
-    *,
-    user_id: str,
-    reminders: list[dict[str, Any]],
-) -> None:
-    """
-    Replace pending/processing REMIND schedules for target dates with new rows.
-    This enables multiple REMIND rows per day while keeping resubmission idempotent.
-    """
-    if not reminders:
-        return
-
-    target_dates = sorted({row["run_at"].date() for row in reminders})
-    for target_date in target_dates:
-        day_start = datetime.combine(target_date, dt_time(hour=0, minute=0, second=0))
-        day_end = day_start + timedelta(days=1)
-        (
-            session.query(Schedule)
-            .filter(
-                Schedule.user_id == user_id,
-                Schedule.event_type == EventType.REMIND,
-                Schedule.run_at >= day_start,
-                Schedule.run_at < day_end,
-                Schedule.state.in_([ScheduleState.PENDING, ScheduleState.PROCESSING]),
-            )
-            .delete(synchronize_session=False)
-        )
-
-    for row in reminders:
-        session.add(
-            Schedule(
-                user_id=user_id,
-                event_type=EventType.REMIND,
-                run_at=row["run_at"],
-                state=ScheduleState.PENDING,
-                retry_count=0,
-                comment=row["task"],
-            )
-        )
-
-
 async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Handle plan modal (callback_id=plan_submit):
@@ -980,6 +895,7 @@ async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, A
     }
     now = datetime.now()
     thread_ts = ""
+    pending_deleted = 0
 
     session = _get_session()
     try:
@@ -998,21 +914,43 @@ async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, A
                 opened_plan_schedule.state = ScheduleState.DONE
                 opened_plan_schedule.updated_at = now
 
-        _replace_remind_schedules_for_days(
-            session,
-            user_id=user_id,
-            reminders=remind_rows_to_save,
+        # DELETE phase: wash all pending schedules for this user.
+        pending_deleted = (
+            session.query(Schedule)
+            .filter(
+                Schedule.user_id == user_id,
+                Schedule.state == ScheduleState.PENDING,
+            )
+            .delete(synchronize_session=False)
         )
 
+        # INSERT phase: reminders.
+        for reminder in remind_rows_to_save:
+            session.add(
+                Schedule(
+                    user_id=user_id,
+                    event_type=EventType.REMIND,
+                    run_at=reminder["run_at"],
+                    state=ScheduleState.PENDING,
+                    retry_count=0,
+                    comment=reminder["task"],
+                )
+            )
+
+        # INSERT phase: next plan.
         next_plan_run_at = _resolve_relative_datetime(
             next_plan["date"],
             next_plan["time"],
         )
-        _upsert_plan_schedule_for_day(
-            session,
-            user_id=user_id,
-            run_at=next_plan_run_at,
-            comment="next plan",
+        session.add(
+            Schedule(
+                user_id=user_id,
+                event_type=EventType.PLAN,
+                run_at=next_plan_run_at,
+                state=ScheduleState.PENDING,
+                retry_count=0,
+                comment="next plan",
+            )
         )
 
         session.commit()
@@ -1030,6 +968,7 @@ async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, A
 
     print(
         f"[{datetime.now()}] process_plan_modal_submit saved schedules: "
+        f"pending_deleted={pending_deleted} "
         f"user_id={user_id} remind_count={len(remind_rows_to_save)} "
         f"next_plan={next_plan['date']} {next_plan['time']} "
         f"db={_SESSION_DB_URL}"

@@ -4,6 +4,7 @@ import json
 import os
 from datetime import datetime
 from typing import Any, Dict
+from collections.abc import Mapping
 
 import requests
 from sqlalchemy import create_engine
@@ -114,25 +115,34 @@ async def process_base_commit(request) -> Dict[str, Any]:
     """
     from backend.slack_ui import base_commit_modal
 
-    existing_commitments: list[dict[str, str]] = []
-    if hasattr(request, "get"):
-        existing_commitments = _load_existing_commitments(request.get("user_id", ""))
-    modal_data = base_commit_modal(existing_commitments)
-    if hasattr(request, "get"):
-        private_metadata: dict[str, str] = {}
-        channel_id = request.get("channel_id")
-        user_id = request.get("user_id")
-        response_url = request.get("response_url")
-        if channel_id:
-            private_metadata["channel_id"] = channel_id
-        if user_id:
-            private_metadata["user_id"] = user_id
-        if response_url:
-            private_metadata["response_url"] = response_url
-        if private_metadata:
-            modal_data["private_metadata"] = json.dumps(private_metadata, ensure_ascii=False)
+    request_map = request if isinstance(request, Mapping) else {}
+    user_id = request_map.get("user_id", "")
+    channel_id = request_map.get("channel_id", "")
+    response_url = request_map.get("response_url", "")
+    trigger_id = request_map.get("trigger_id", "")
 
-    trigger_id = request.get("trigger_id") if hasattr(request, "get") else None
+    if not isinstance(user_id, str):
+        user_id = ""
+    if not isinstance(channel_id, str):
+        channel_id = ""
+    if not isinstance(response_url, str):
+        response_url = ""
+    if not isinstance(trigger_id, str):
+        trigger_id = ""
+
+    existing_commitments: list[dict[str, str]] = []
+    if user_id:
+        existing_commitments = _load_existing_commitments(user_id)
+    modal_data = base_commit_modal(existing_commitments)
+    private_metadata: dict[str, str] = {}
+    if channel_id:
+        private_metadata["channel_id"] = channel_id
+    if user_id:
+        private_metadata["user_id"] = user_id
+    if response_url:
+        private_metadata["response_url"] = response_url
+    if private_metadata:
+        modal_data["private_metadata"] = json.dumps(private_metadata, ensure_ascii=False)
 
     if trigger_id:
         ok, reason = await asyncio.to_thread(_open_slack_modal, trigger_id, modal_data)
