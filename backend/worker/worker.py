@@ -29,7 +29,6 @@ class PunishmentWorker:
             session: DBセッション
         """
         self.session = session
-        self._bootstrap_checked = False
 
     def _resolve_bootstrap_user_id(self) -> Optional[str]:
         """
@@ -219,14 +218,11 @@ class PunishmentWorker:
         """
         1回分の処理を実行する
         """
-        if not self._bootstrap_checked:
-            try:
-                await self.ensure_initial_plan_schedule()
-            except Exception as e:
-                self.session.rollback()
-                logger.error(f"Bootstrap error: {e}")
-            finally:
-                self._bootstrap_checked = True
+        try:
+            await self.ensure_initial_plan_schedule()
+        except Exception as e:
+            self.session.rollback()
+            logger.error(f"Bootstrap error: {e}")
 
         schedules = await self.fetch_pending_schedules()
         logger.info(f"Processing {len(schedules)} schedules")

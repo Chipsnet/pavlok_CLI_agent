@@ -219,3 +219,47 @@ class TestPunishmentWorker:
                     pass
 
         assert call_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_run_once_calls_bootstrap_every_time(self, v3_db_session):
+        """run_onceは毎回bootstrapチェックを行うこと"""
+        worker = PunishmentWorker(v3_db_session)
+
+        with patch.object(
+            worker, "ensure_initial_plan_schedule", new=AsyncMock(return_value=None)
+        ) as mock_bootstrap, patch.object(
+            worker, "fetch_pending_schedules", new=AsyncMock(return_value=[])
+        ) as mock_fetch, patch.object(
+            worker, "process_schedule", new=AsyncMock()
+        ) as mock_process:
+            await worker.run_once()
+            await worker.run_once()
+
+        assert mock_bootstrap.await_count == 2
+        assert mock_fetch.await_count == 2
+        assert mock_process.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_run_once_continues_after_bootstrap_error(self):
+        """bootstrap失敗時もrollbackしてpending処理を継続すること"""
+        mock_session = MagicMock()
+        worker = PunishmentWorker(mock_session)
+        fake_schedule = MagicMock()
+
+        with patch.object(
+            worker,
+            "ensure_initial_plan_schedule",
+            new=AsyncMock(side_effect=Exception("bootstrap failed")),
+        ) as mock_bootstrap, patch.object(
+            worker,
+            "fetch_pending_schedules",
+            new=AsyncMock(return_value=[fake_schedule]),
+        ) as mock_fetch, patch.object(
+            worker, "process_schedule", new=AsyncMock()
+        ) as mock_process:
+            await worker.run_once()
+
+        assert mock_bootstrap.await_count == 1
+        assert mock_session.rollback.call_count == 1
+        assert mock_fetch.await_count == 1
+        assert mock_process.await_count == 1
