@@ -2,13 +2,15 @@
 import pytest
 from unittest.mock import MagicMock
 from fastapi import Request, HTTPException, status
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 from backend.api.command import (
     process_base_commit,
     process_stop,
     process_restart,
     process_config
 )
-from backend.models import Schedule
+from backend.models import Schedule, Base, Commitment
 
 
 @pytest.mark.asyncio
@@ -22,6 +24,67 @@ class TestCommandApi:
         result = await process_base_commit(request)
         assert result["status"] == "success"
         assert "blocks" in result
+
+    @pytest.mark.asyncio
+    async def test_base_commit_prefills_existing_commitments(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "prefill.db"
+        database_url = f"sqlite:///{db_path}"
+        engine = create_engine(database_url, connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+        session = Session()
+        try:
+            session.add_all(
+                [
+                    Commitment(user_id="U_TEST", task="昼", time="12:00:00", active=True),
+                    Commitment(user_id="U_TEST", task="朝", time="07:00:00", active=True),
+                    Commitment(user_id="U_TEST", task="夜", time="21:00:00", active=True),
+                ]
+            )
+            session.commit()
+        finally:
+            session.close()
+
+        monkeypatch.setenv("DATABASE_URL", database_url)
+
+        captured: dict = {}
+
+        def fake_open_slack_modal(trigger_id, view):
+            captured["trigger_id"] = trigger_id
+            captured["view"] = view
+            return True, "ok"
+
+        monkeypatch.setattr("backend.api.command._open_slack_modal", fake_open_slack_modal)
+
+        result = await process_base_commit(
+            {
+                "user_id": "U_TEST",
+                "trigger_id": "TRIGGER_TEST",
+                "channel_id": "C_TEST",
+                "response_url": "https://example.com/response",
+            }
+        )
+
+        assert result["status"] == "success"
+        assert captured["trigger_id"] == "TRIGGER_TEST"
+        view = captured["view"]
+        assert view["callback_id"] == "base_commit_submit"
+
+        blocks = view["blocks"]
+        task1 = next(b for b in blocks if b.get("block_id") == "commitment_1")
+        task2 = next(b for b in blocks if b.get("block_id") == "commitment_2")
+        task3 = next(b for b in blocks if b.get("block_id") == "commitment_3")
+        time1 = next(b for b in blocks if b.get("block_id") == "time_1")
+        time2 = next(b for b in blocks if b.get("block_id") == "time_2")
+        time3 = next(b for b in blocks if b.get("block_id") == "time_3")
+
+        assert task1["element"].get("initial_value") == "朝"
+        assert task2["element"].get("initial_value") == "昼"
+        assert task3["element"].get("initial_value") == "夜"
+        assert time1["element"].get("initial_time") == "07:00"
+        assert time2["element"].get("initial_time") == "12:00"
+        assert time3["element"].get("initial_time") == "21:00"
 
     @pytest.mark.asyncio
     async def test_stop_command(self, v3_db_session, v3_test_data_factory):

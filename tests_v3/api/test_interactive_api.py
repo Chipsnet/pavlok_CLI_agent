@@ -37,8 +37,7 @@ class TestInteractiveApi:
         }
 
         result = await process_plan_submit(payload_data)
-        assert result["status"] == "success"
-        assert result.get("detail") == "予定を登録しました"
+        assert result["response_action"] == "clear"
 
     @pytest.mark.asyncio
     async def test_remind_response_yes(self, v3_db_session, v3_test_data_factory):

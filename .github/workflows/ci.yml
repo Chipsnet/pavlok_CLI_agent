@@ -37,9 +37,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint
 
-    services:
-      # SQLite uses in-memory for tests, no external service needed
-
     steps:
       - uses: actions/checkout@v4
 

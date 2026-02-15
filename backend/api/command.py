@@ -1,10 +1,65 @@
 """Command API Handlers"""
 import asyncio
+import json
 import os
 from datetime import datetime
 from typing import Any, Dict
 
 import requests
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from backend.models import Commitment
+
+MAX_COMMITMENT_ROWS = 10
+
+_SESSION_FACTORY = None
+_SESSION_DB_URL = None
+
+
+def _get_session():
+    """Create DB session using current DATABASE_URL."""
+    global _SESSION_FACTORY, _SESSION_DB_URL
+    database_url = os.getenv("DATABASE_URL", "sqlite:///./oni.db")
+
+    if _SESSION_FACTORY is None or _SESSION_DB_URL != database_url:
+        engine = create_engine(
+            database_url,
+            connect_args={"check_same_thread": False} if "sqlite" in database_url else {},
+        )
+        _SESSION_FACTORY = sessionmaker(
+            autocommit=False,
+            autoflush=False,
+            bind=engine,
+        )
+        _SESSION_DB_URL = database_url
+
+    return _SESSION_FACTORY()
+
+
+def _load_existing_commitments(user_id: str) -> list[dict[str, str]]:
+    """Load existing active commitments for modal prefill."""
+    if not user_id:
+        return []
+
+    session = _get_session()
+    try:
+        rows = (
+            session.query(Commitment)
+            .filter(
+                Commitment.user_id == user_id,
+                Commitment.active.is_(True),
+            )
+            .order_by(Commitment.time.asc(), Commitment.created_at.asc())
+            .limit(MAX_COMMITMENT_ROWS)
+            .all()
+        )
+        return [{"task": row.task, "time": row.time} for row in rows]
+    except Exception as exc:
+        print(f"[{datetime.now()}] failed to load commitments for modal: {exc}")
+        return []
+    finally:
+        session.close()
 
 
 def _open_slack_modal(trigger_id: str, view: Dict[str, Any]) -> tuple[bool, str]:
@@ -59,7 +114,24 @@ async def process_base_commit(request) -> Dict[str, Any]:
     """
     from backend.slack_ui import base_commit_modal
 
-    modal_data = base_commit_modal([])
+    existing_commitments: list[dict[str, str]] = []
+    if hasattr(request, "get"):
+        existing_commitments = _load_existing_commitments(request.get("user_id", ""))
+    modal_data = base_commit_modal(existing_commitments)
+    if hasattr(request, "get"):
+        private_metadata: dict[str, str] = {}
+        channel_id = request.get("channel_id")
+        user_id = request.get("user_id")
+        response_url = request.get("response_url")
+        if channel_id:
+            private_metadata["channel_id"] = channel_id
+        if user_id:
+            private_metadata["user_id"] = user_id
+        if response_url:
+            private_metadata["response_url"] = response_url
+        if private_metadata:
+            modal_data["private_metadata"] = json.dumps(private_metadata, ensure_ascii=False)
+
     trigger_id = request.get("trigger_id") if hasattr(request, "get") else None
 
     if trigger_id:

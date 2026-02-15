@@ -30,6 +30,39 @@ function extractUserId(payload) {
   return payload.data?.user_id;
 }
 
+function resolveBackendUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    // Allow USER_MAP values like "https://example.com/" by defaulting to gateway path.
+    if (url.pathname === "/" || url.pathname === "") {
+      url.pathname = "/slack/gateway";
+    }
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+async function buildSlackResponse(backendResponse, payloadType) {
+  const bodyText = await backendResponse.text();
+  const headers = new Headers();
+
+  const backendContentType = backendResponse.headers.get("Content-Type");
+  if (backendContentType) {
+    headers.set("Content-Type", backendContentType);
+  } else if (payloadType === "interactive") {
+    headers.set("Content-Type", "application/json; charset=utf-8");
+  } else {
+    headers.set("Content-Type", "text/plain; charset=utf-8");
+  }
+  headers.set("Cache-Control", "no-store");
+
+  return new Response(bodyText, {
+    status: backendResponse.status,
+    headers,
+  });
+}
+
 async function verifySlackSignature(request, rawBody, signingSecret) {
   const timestamp = request.headers.get("X-Slack-Request-Timestamp");
   const signature = request.headers.get("X-Slack-Signature");
@@ -90,9 +123,9 @@ export default {
       return new Response("Cannot identify user", { status: 400 });
     }
 
-    const backendUrl = userMap[userId];
+    const backendUrl = resolveBackendUrl(userMap[userId]);
     if (!backendUrl) {
-      return new Response("No backend for user", { status: 403 });
+      return new Response("No backend for user (invalid URL)", { status: 403 });
     }
 
     const backendResponse = await fetch(backendUrl, {
@@ -110,10 +143,7 @@ export default {
       body: rawBody,
     });
 
-    // Pass through backend status/body so Slack receives the same UI payload.
-    return new Response(backendResponse.body, {
-      status: backendResponse.status,
-      headers: backendResponse.headers,
-    });
+    // Build a clean response for Slack (avoid problematic hop-by-hop headers).
+    return await buildSlackResponse(backendResponse, payload.type);
   },
 };
