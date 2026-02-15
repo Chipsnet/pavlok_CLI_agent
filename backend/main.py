@@ -1,11 +1,13 @@
 """FastAPI Main Application for Oni System v0.3"""
 import os
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
+from dotenv import load_dotenv
 
 from .api import (
     process_base_commit, process_stop, process_restart, process_config,
@@ -15,6 +17,8 @@ from .api.signature import verify_slack_signature
 from .api.internal_protection import verify_internal_request
 from .models import Base
 
+# Load local .env if present (without overriding real environment variables).
+load_dotenv()
 
 # ============================================================================
 # Database Setup
@@ -119,27 +123,8 @@ async def slack_command(request: Request):
             content={"error": "Invalid signature"}
         )
 
-    # Parse command
     form_data = await request.form()
-    command = form_data.get("command")
-    user_id = form_data.get("user_id")
-
-    print(f"[{datetime.now()}] Slack command: {command} from user {user_id}")
-
-    # Route to appropriate handler
-    if command == "/base_commit":
-        return await process_base_commit(form_data)
-    elif command == "/stop":
-        return await process_stop(form_data)
-    elif command == "/restart":
-        return await process_restart(form_data)
-    elif command == "/config":
-        return await process_config(form_data)
-    else:
-        return JSONResponse(
-            status_code=400,
-            content={"error": f"Unknown command: {command}"}
-        )
+    return await route_slash_command(form_data)
 
 
 @app.post("/slack/interactive")
@@ -152,7 +137,6 @@ async def slack_interactive(request: Request):
             content={"error": "Invalid signature"}
         )
 
-    # Parse payload
     form_data = await request.form()
     payload = form_data.get("payload")
 
@@ -162,32 +146,80 @@ async def slack_interactive(request: Request):
             content={"error": "Missing payload"}
         )
 
-    import json
     payload_data = json.loads(payload)
+    return await route_interactive_payload(payload_data)
 
+
+@app.post("/slack/gateway")
+async def slack_gateway(request: Request):
+    """
+    Unified Slack ingress endpoint.
+    Accept both slash commands and interactive payloads, then route internally.
+    """
+    if not await verify_slack_signature(request):
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Invalid signature"}
+        )
+
+    form_data = await request.form()
+    payload = form_data.get("payload")
+
+    if payload:
+        try:
+            payload_data = json.loads(payload)
+        except json.JSONDecodeError:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Invalid JSON payload"}
+            )
+        return await route_interactive_payload(payload_data)
+
+    return await route_slash_command(form_data)
+
+
+async def route_slash_command(form_data):
+    """Route slash command form payload to command handlers."""
+    command = form_data.get("command")
+    user_id = form_data.get("user_id")
+    print(f"[{datetime.now()}] Slack command: {command} from user {user_id}")
+
+    if command == "/base_commit":
+        return await process_base_commit(form_data)
+    if command == "/stop":
+        return await process_stop(form_data)
+    if command == "/restart":
+        return await process_restart(form_data)
+    if command == "/config":
+        return await process_config(form_data)
+
+    return JSONResponse(
+        status_code=400,
+        content={"error": f"Unknown command: {command}"}
+    )
+
+
+async def route_interactive_payload(payload_data):
+    """Route Slack interactive payload to appropriate handlers."""
     action_type = payload_data.get("type")
     user_id = payload_data.get("user", {}).get("id")
-
     print(f"[{datetime.now()}] Slack interactive: {action_type} from user {user_id}")
 
-    # Route to appropriate handler
     if action_type == "view_submission":
-        # Modal submission
         callback_id = payload_data.get("view", {}).get("callback_id")
         if callback_id == "commitment_submit":
             return await process_plan_submit(payload_data)
-        elif callback_id == "config_submit":
+        if callback_id == "config_submit":
             return await process_config(payload_data)
     elif action_type == "block_actions":
-        # Button click
         actions = payload_data.get("actions", [])
         if actions:
             action_id = actions[0].get("action_id")
             if action_id == "remind_yes":
                 return await process_remind_response(payload_data, "YES")
-            elif action_id == "remind_no":
+            if action_id == "remind_no":
                 return await process_remind_response(payload_data, "NO")
-            elif action_id == "ignore_respond":
+            if action_id == "ignore_respond":
                 return await process_ignore_response(payload_data)
 
     return JSONResponse(
