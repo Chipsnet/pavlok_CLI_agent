@@ -409,7 +409,7 @@ async def _run_agent_call(schedule_ids: list[str]) -> None:
     if ok:
         print(
             f"[{datetime.now()}] agent_call succeeded: "
-            f"schedule_count={len(schedule_ids)}"
+            f"schedule_count={len(schedule_ids)} detail={reason}"
         )
     else:
         print(f"[{datetime.now()}] agent_call failed: {reason}")
@@ -1013,6 +1013,7 @@ async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, A
         )
 
         # INSERT phase: reminders.
+        inserted_remind_schedules: list[Schedule] = []
         for reminder in remind_rows_to_save:
             remind_schedule = Schedule(
                 user_id=user_id,
@@ -1023,7 +1024,13 @@ async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, A
                 comment=reminder["task"],
             )
             session.add(remind_schedule)
-            inserted_remind_schedule_ids.append(str(remind_schedule.id))
+            inserted_remind_schedules.append(remind_schedule)
+
+        # Ensure UUIDs are materialized before forwarding IDs to agent_call.
+        session.flush()
+        inserted_remind_schedule_ids = [
+            str(s.id) for s in inserted_remind_schedules if getattr(s, "id", None)
+        ]
 
         # INSERT phase: next plan.
         next_plan_run_at = _resolve_relative_datetime(
