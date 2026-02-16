@@ -1,6 +1,7 @@
 """No Mode Detection Module"""
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Any
+
 from sqlalchemy.orm import Session
 
 
@@ -12,7 +13,7 @@ def calculate_no_punishment(no_time: int) -> Dict[str, Any]:
         no_time: no回数（TIMEOUT_REMIND単位）
 
     Returns:
-        {"mode": PunishmentMode, "count": int}
+        {"mode": PunishmentMode, "value": int}
     """
     from backend.models import PunishmentMode
 
@@ -21,7 +22,7 @@ def calculate_no_punishment(no_time: int) -> Dict[str, Any]:
     index = min(no_time - 1, len(zap_values) - 1)
     zap_value = zap_values[index]
 
-    return {"mode": PunishmentMode.NO, "count": zap_value}
+    return {"mode": PunishmentMode.NO, "value": zap_value}
 
 
 def detect_no_mode(session: Session, schedule) -> Dict[str, Any]:
@@ -63,7 +64,7 @@ def detect_no_mode(session: Session, schedule) -> Dict[str, Any]:
     # Calculate no_time
     no_time = elapsed // timeout_remind
 
-    # Check if punishment already exists
+    # Check if punishment already exists for the same trigger index.
     existing = session.query(Punishment).filter_by(
         schedule_id=schedule.id,
         mode=PunishmentMode.NO,
@@ -79,7 +80,7 @@ def detect_no_mode(session: Session, schedule) -> Dict[str, Any]:
     punishment = Punishment(
         schedule_id=schedule.id,
         mode=punishment_data["mode"],
-        count=punishment_data["count"]
+        count=no_time,
     )
     session.add(punishment)
     session.commit()

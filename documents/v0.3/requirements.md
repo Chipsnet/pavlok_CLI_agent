@@ -45,19 +45,20 @@
 ### `panishment`機構
 - 1分間隔でscheduleテーブルを監視する機構
 - 実行するスクリプトはサブプロセスとして非同期で実行しメイン処理自体は監視にすぐ戻れるよう考慮する
-- 最新の`pending`レコードに対して`現在時間 - 実行時間`が設定値の倍数を超え、その倍数のpanishment記録がなければ`pavloc`アルゴリズム(ignoreモード)に従った刺激種類、強度でpavlok APIをコールする
+- `pending`処理と`processing`監視を同一サイクルで実行する
+- ignore監視は最新の`processing(plan)`レコードを対象に、`現在時間 - 実行時間`が設定値の倍数を超え、その回数のpanishment記録がなければ`pavloc`アルゴリズム(ignoreモード)に従った刺激種類/強度を計算してpavlok APIをコールする
 
 ### `pavloc`アルゴリズム
 #### ignoreモード
-- ignore_time = (`現在時間 - 実行時間`) // {設定値(ignore_interval)} をベースの計算式とする
-- トリガーになったschedule.idのignore_timeレコードがpanishmentテーブルに存在しないことを確認する
-- アルゴリズムは以下の通り
-  - ignore_time == 1
-    - vibe: 100
-  - ignore_time > 1
-    - zap: (35 + (10 x (ignore_time - 2)))
-    - 100を超える場合は100に丸めてAPIコールすること
-    - 100を実行した場合は対象のscheduleレコードのstateを`failed`に更新し実行終了とする
+  - ignore_time = (`現在時間 - 実行時間`) // {設定値(ignore_interval)} をベースの計算式とする
+  - トリガーになったschedule.idのignore_timeレコードがpanishmentテーブルに存在しないことを確認する
+  - アルゴリズムは以下の通り
+    - ignore_time == 1
+      - vibe: 100
+    - ignore_time > 1
+      - zap: (35 + (10 x (ignore_time - 2)))
+      - 100を超える場合は100に丸めてAPIコールすること
+    - 100を実行した場合、または`IGNORE_MAX_RETRY`超過時は対象のscheduleレコードのstateを`canceled`に更新し実行終了とする
       - このケースでは行動ログに記録すること
 #### NOモード
 - 行動ログの`remind`eventを最新から`YES`が出るまで遡り`NO`の連続回数(NO_count)を算出する

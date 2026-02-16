@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+import backend.api.interactive as interactive_api
 from backend.api.interactive import (
     process_plan_submit,
     process_plan_modal_submit,
@@ -14,8 +15,21 @@ from backend.api.interactive import (
     process_commitment_add_row,
     process_commitment_remove_row,
 )
-from backend.models import Base, Schedule, Commitment, ActionLog, ActionResult, EventType, ScheduleState
+from backend.models import (
+    Base,
+    Schedule,
+    Commitment,
+    ActionLog,
+    ActionResult,
+    EventType,
+    ScheduleState,
+    Punishment,
+    PunishmentMode,
+    Configuration,
+    ConfigValueType,
+)
 from backend.slack_ui import base_commit_modal
+from backend.worker.config_cache import invalidate_config_cache
 
 
 @pytest.mark.asyncio
@@ -51,6 +65,12 @@ class TestInteractiveApi:
         monkeypatch.setenv("DATABASE_URL", database_url)
         monkeypatch.setattr("backend.api.interactive._SESSION_FACTORY", None)
         monkeypatch.setattr("backend.api.interactive._SESSION_DB_URL", None)
+        async def _fake_notify_plan_saved(*args, **kwargs):
+            return None
+        async def _fake_run_agent_call(*args, **kwargs):
+            return None
+        monkeypatch.setattr("backend.api.interactive._notify_plan_saved", _fake_notify_plan_saved)
+        monkeypatch.setattr("backend.api.interactive._run_agent_call", _fake_run_agent_call)
 
         engine = create_engine(
             database_url,
@@ -209,6 +229,12 @@ class TestInteractiveApi:
         monkeypatch.setenv("DATABASE_URL", database_url)
         monkeypatch.setattr("backend.api.interactive._SESSION_FACTORY", None)
         monkeypatch.setattr("backend.api.interactive._SESSION_DB_URL", None)
+        async def _fake_notify_plan_saved(*args, **kwargs):
+            return None
+        async def _fake_run_agent_call(*args, **kwargs):
+            return None
+        monkeypatch.setattr("backend.api.interactive._notify_plan_saved", _fake_notify_plan_saved)
+        monkeypatch.setattr("backend.api.interactive._run_agent_call", _fake_run_agent_call)
 
         engine = create_engine(
             database_url,
@@ -335,6 +361,12 @@ class TestInteractiveApi:
         monkeypatch.setenv("DATABASE_URL", database_url)
         monkeypatch.setattr("backend.api.interactive._SESSION_FACTORY", None)
         monkeypatch.setattr("backend.api.interactive._SESSION_DB_URL", None)
+        async def _fake_notify_remind_result(*args, **kwargs):
+            return None
+        monkeypatch.setattr(
+            "backend.api.interactive._notify_remind_result",
+            _fake_notify_remind_result,
+        )
 
         engine = create_engine(
             database_url,
@@ -392,6 +424,12 @@ class TestInteractiveApi:
         monkeypatch.setenv("DATABASE_URL", database_url)
         monkeypatch.setattr("backend.api.interactive._SESSION_FACTORY", None)
         monkeypatch.setattr("backend.api.interactive._SESSION_DB_URL", None)
+        async def _fake_notify_remind_result(*args, **kwargs):
+            return None
+        monkeypatch.setattr(
+            "backend.api.interactive._notify_remind_result",
+            _fake_notify_remind_result,
+        )
         async def _fake_no_punishment(*args, **kwargs):
             return None
         monkeypatch.setattr("backend.api.interactive._send_no_punishment", _fake_no_punishment)
@@ -443,6 +481,16 @@ class TestInteractiveApi:
             .count()
         )
         assert no_count == 1
+        no_punishments = (
+            session.query(Punishment)
+            .filter(
+                Punishment.schedule_id == schedule_id,
+                Punishment.mode == PunishmentMode.NO,
+                Punishment.count == 1,
+            )
+            .count()
+        )
+        assert no_punishments == 1
         session.close()
 
     @pytest.mark.asyncio
@@ -452,6 +500,12 @@ class TestInteractiveApi:
         monkeypatch.setenv("DATABASE_URL", database_url)
         monkeypatch.setattr("backend.api.interactive._SESSION_FACTORY", None)
         monkeypatch.setattr("backend.api.interactive._SESSION_DB_URL", None)
+        async def _fake_notify_remind_result(*args, **kwargs):
+            return None
+        monkeypatch.setattr(
+            "backend.api.interactive._notify_remind_result",
+            _fake_notify_remind_result,
+        )
         async def _fake_no_punishment(*args, **kwargs):
             return None
         monkeypatch.setattr("backend.api.interactive._send_no_punishment", _fake_no_punishment)
@@ -521,6 +575,147 @@ class TestInteractiveApi:
         assert yes_count == 1
         assert no_count == 0
         session.close()
+
+    @pytest.mark.asyncio
+    async def test_send_no_punishment_sends_when_daily_limit_not_exceeded(
+        self, monkeypatch, tmp_path
+    ):
+        db_path = tmp_path / "send_no_punishment_limit_ok.sqlite3"
+        database_url = f"sqlite:///{db_path}"
+        invalidate_config_cache()
+        monkeypatch.setenv("DATABASE_URL", database_url)
+        monkeypatch.setattr("backend.api.interactive._SESSION_FACTORY", None)
+        monkeypatch.setattr("backend.api.interactive._SESSION_DB_URL", None)
+
+        engine = create_engine(
+            database_url,
+            connect_args={"check_same_thread": False},
+        )
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine)
+
+        user_id = "U03JBULT484"
+        session = Session()
+        session.add(
+            Configuration(
+                user_id=user_id,
+                key="LIMIT_DAY_PAVLOK_COUNTS",
+                value="1",
+                value_type=ConfigValueType.INT,
+            )
+        )
+        schedule = Schedule(
+            user_id=user_id,
+            event_type=EventType.REMIND,
+            run_at=datetime.now(),
+            state=ScheduleState.DONE,
+        )
+        session.add(schedule)
+        session.flush()
+        session.add(
+            Punishment(
+                schedule_id=schedule.id,
+                mode=PunishmentMode.NO,
+                count=1,
+            )
+        )
+        session.commit()
+        schedule_id = schedule.id
+        session.close()
+
+        calls: list[tuple[str, int]] = []
+
+        class _FakePavlokClient:
+            def stimulate(self, stimulus_type: str, value: int):
+                calls.append((stimulus_type, value))
+                return {"success": True}
+
+        monkeypatch.setattr("backend.pavlok_lib.PavlokClient", _FakePavlokClient)
+
+        await interactive_api._send_no_punishment(
+            user_id=user_id,
+            schedule_id=schedule_id,
+            punishment={"type": "zap", "value": 45},
+        )
+
+        assert calls == [("zap", 45)]
+
+    @pytest.mark.asyncio
+    async def test_send_no_punishment_skips_when_daily_limit_exceeded(
+        self, monkeypatch, tmp_path
+    ):
+        db_path = tmp_path / "send_no_punishment_limit_exceeded.sqlite3"
+        database_url = f"sqlite:///{db_path}"
+        invalidate_config_cache()
+        monkeypatch.setenv("DATABASE_URL", database_url)
+        monkeypatch.setattr("backend.api.interactive._SESSION_FACTORY", None)
+        monkeypatch.setattr("backend.api.interactive._SESSION_DB_URL", None)
+
+        engine = create_engine(
+            database_url,
+            connect_args={"check_same_thread": False},
+        )
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine)
+
+        user_id = "U03JBULT484"
+        session = Session()
+        session.add(
+            Configuration(
+                user_id=user_id,
+                key="LIMIT_DAY_PAVLOK_COUNTS",
+                value="1",
+                value_type=ConfigValueType.INT,
+            )
+        )
+        schedule1 = Schedule(
+            user_id=user_id,
+            event_type=EventType.REMIND,
+            run_at=datetime.now(),
+            state=ScheduleState.DONE,
+        )
+        schedule2 = Schedule(
+            user_id=user_id,
+            event_type=EventType.REMIND,
+            run_at=datetime.now(),
+            state=ScheduleState.DONE,
+        )
+        session.add_all([schedule1, schedule2])
+        session.flush()
+        session.add_all(
+            [
+                Punishment(
+                    schedule_id=schedule1.id,
+                    mode=PunishmentMode.NO,
+                    count=1,
+                ),
+                Punishment(
+                    schedule_id=schedule2.id,
+                    mode=PunishmentMode.NO,
+                    count=1,
+                ),
+            ]
+        )
+        session.commit()
+        schedule2_id = schedule2.id
+        session.close()
+
+        calls: list[tuple[str, int]] = []
+
+        class _FakePavlokClient:
+            def stimulate(self, stimulus_type: str, value: int):
+                calls.append((stimulus_type, value))
+                return {"success": True}
+
+        monkeypatch.setattr("backend.pavlok_lib.PavlokClient", _FakePavlokClient)
+
+        await interactive_api._send_no_punishment(
+            user_id=user_id,
+            schedule_id=schedule2_id,
+            punishment={"type": "zap", "value": 55},
+        )
+
+        assert calls == []
 
     @pytest.mark.asyncio
     async def test_ignore_response_yes(self, v3_db_session, v3_test_data_factory):

@@ -36,29 +36,29 @@ class TestNoModeDetection:
         # 1回目
         result1 = calculate_no_punishment(no_time=1)
         assert result1["mode"] == PunishmentMode.NO
-        assert result1["count"] == 35
+        assert result1["value"] == 35
 
         # 2回目
         result2 = calculate_no_punishment(no_time=2)
         assert result2["mode"] == PunishmentMode.NO
-        assert result2["count"] == 55
+        assert result2["value"] == 55
 
         # 3回目
         result3 = calculate_no_punishment(no_time=3)
         assert result3["mode"] == PunishmentMode.NO
-        assert result3["count"] == 75
+        assert result3["value"] == 75
 
         # 4回目
         result4 = calculate_no_punishment(no_time=4)
         assert result4["mode"] == PunishmentMode.NO
-        assert result4["count"] == 100
+        assert result4["value"] == 100
 
     @pytest.mark.asyncio
     async def test_calculate_punishment_max_100(self):
         """ZAPは最大100であること"""
         result = calculate_no_punishment(no_time=10)
         assert result["mode"] == PunishmentMode.NO
-        assert result["count"] == 100
+        assert result["value"] == 100
 
     @pytest.mark.asyncio
     async def test_punishment_already_exists(self, v3_db_session, v3_test_data_factory):

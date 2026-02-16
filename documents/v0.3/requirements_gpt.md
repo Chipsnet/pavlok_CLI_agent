@@ -89,7 +89,7 @@
 
 ### 発火条件
 
-* state = pending
+* state = processing（event_type=plan）
 * `ignore_time = (now - run_at) // ignore_interval`
 
 ### 実行条件
@@ -157,10 +157,11 @@
 ### 監視ロジック
 
 1. `pending AND run_at <= now` を取得
-2. 1件のみ `processing` に原子的更新
+2. 1件ずつ `processing` に原子的更新
 3. 更新成功プロセスのみ実行
-4. 成功 → done
+4. plan成功 → stateはprocessing維持、remind成功 → done
 5. 失敗 → failed
+6. 同一サイクル内で `processing AND run_at <= now AND event_type=plan` を監視し、ignore検知を実行
 
 ---
 

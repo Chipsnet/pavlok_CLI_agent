@@ -145,6 +145,79 @@ class PunishmentWorker:
 
         return schedules
 
+    async def fetch_processing_plan_schedules(self) -> List:
+        """
+        監視対象候補のprocessing planを取得する
+
+        Returns:
+            processingかつplanかつrun_at <= nowのスケジュールリスト
+        """
+        from backend.models import Schedule, ScheduleState, EventType
+
+        now = datetime.now()
+        schedules = (
+            self.session.query(Schedule)
+            .filter(
+                Schedule.state == ScheduleState.PROCESSING,
+                Schedule.event_type == EventType.PLAN,
+                Schedule.run_at <= now,
+            )
+            .all()
+        )
+        return schedules
+
+    @staticmethod
+    def _recency_key(schedule) -> tuple:
+        """Compare schedules by most recently updated processing context."""
+        updated = schedule.updated_at or datetime.min
+        run_at = schedule.run_at or datetime.min
+        created = schedule.created_at or datetime.min
+        return (updated, run_at, created, str(schedule.id))
+
+    def select_latest_processing_per_user(self, schedules: List) -> List:
+        """
+        ユーザーごとに最新processingレコードを1件に絞る
+        """
+        latest_by_user = {}
+        for schedule in schedules:
+            user_id = str(schedule.user_id)
+            current = latest_by_user.get(user_id)
+            if current is None or self._recency_key(schedule) > self._recency_key(current):
+                latest_by_user[user_id] = schedule
+        return list(latest_by_user.values())
+
+    def cancel_stale_processing_plans(self, user_id: str, keep_schedule_id: str) -> int:
+        """
+        同一ユーザーの古いprocessing planをcanceledに更新する
+
+        Returns:
+            更新件数
+        """
+        from backend.models import Schedule, ScheduleState, EventType
+
+        stale_rows = (
+            self.session.query(Schedule)
+            .filter(
+                Schedule.user_id == user_id,
+                Schedule.event_type == EventType.PLAN,
+                Schedule.state == ScheduleState.PROCESSING,
+                Schedule.id != keep_schedule_id,
+            )
+            .all()
+        )
+        for stale in stale_rows:
+            stale.state = ScheduleState.CANCELED
+
+        if stale_rows:
+            self.session.commit()
+            logger.info(
+                "Canceled stale processing plans: user_id=%s count=%s keep_schedule_id=%s",
+                user_id,
+                len(stale_rows),
+                keep_schedule_id,
+            )
+        return len(stale_rows)
+
     async def execute_script(self, script_name: str, schedule) -> None:
         """
         スクリプトを実行する
@@ -182,10 +255,14 @@ class PunishmentWorker:
             schedule: 対象スケジュール
         """
         from backend.models import ScheduleState, EventType
-        from backend.worker.ignore_mode import detect_ignore_mode
-        from backend.worker.no_mode import detect_no_mode
 
         try:
+            if schedule.event_type == EventType.PLAN:
+                self.cancel_stale_processing_plans(
+                    user_id=str(schedule.user_id),
+                    keep_schedule_id=str(schedule.id),
+                )
+
             # Mark as processing while script is running / waiting for user response.
             schedule.state = ScheduleState.PROCESSING
             self.session.commit()
@@ -195,16 +272,6 @@ class PunishmentWorker:
                 await self.execute_script("plan.py", schedule)
             elif schedule.event_type == EventType.REMIND:
                 await self.execute_script("remind.py", schedule)
-
-            # Check for ignore_mode
-            ignore_result = detect_ignore_mode(self.session, schedule)
-            if ignore_result["detected"]:
-                logger.info(f"ignore_mode detected: {ignore_result['ignore_time']}")
-
-            # Check for no_mode
-            no_result = detect_no_mode(self.session, schedule)
-            if no_result["detected"]:
-                logger.info(f"no_mode detected: {no_result['no_time']}")
 
             # For plan, keep processing until user submits response.
             # For remind, keep current behavior and mark done after notification.
@@ -226,6 +293,37 @@ class PunishmentWorker:
                 schedule.run_at = datetime.now() + timedelta(minutes=retry_delay)
                 schedule.state = ScheduleState.PENDING
             self.session.commit()
+
+    async def monitor_processing_schedules(self) -> None:
+        """
+        processing状態のplanを監視してignoreを検知する
+        """
+        from backend.worker.ignore_mode import detect_ignore_mode
+
+        candidates = await self.fetch_processing_plan_schedules()
+        targets = self.select_latest_processing_per_user(candidates)
+        logger.info(
+            "Monitoring %s processing schedules (candidates=%s)",
+            len(targets),
+            len(candidates),
+        )
+
+        for schedule in targets:
+            try:
+                ignore_result = detect_ignore_mode(self.session, schedule)
+                if ignore_result["detected"]:
+                    logger.info(
+                        "ignore_mode detected: schedule_id=%s ignore_time=%s",
+                        schedule.id,
+                        ignore_result["ignore_time"],
+                    )
+            except Exception as e:
+                self.session.rollback()
+                logger.error(
+                    "Processing monitor error: schedule_id=%s error=%s",
+                    schedule.id,
+                    e,
+                )
 
     async def run_once(self) -> None:
         """
@@ -249,6 +347,8 @@ class PunishmentWorker:
 
         for schedule in schedules:
             await self.process_schedule(schedule)
+
+        await self.monitor_processing_schedules()
 
     async def run(self) -> None:
         """

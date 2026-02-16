@@ -19,6 +19,8 @@ from backend.models import (
     EventType,
     ActionLog,
     ActionResult,
+    Punishment,
+    PunishmentMode,
     Configuration,
 )
 
@@ -975,7 +977,7 @@ async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, A
     }
     now = datetime.now()
     thread_ts = ""
-    pending_canceled = 0
+    inflight_canceled = 0
     inserted_remind_schedule_ids: list[str] = []
     opened_plan_schedule_id = ""
 
@@ -997,12 +999,13 @@ async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, A
                 opened_plan_schedule.updated_at = now
                 opened_plan_schedule_id = str(opened_plan_schedule.id)
 
-        # Wash phase: mark all pending schedules for this user as canceled.
-        pending_canceled = (
+        # Wash phase: mark all inflight schedules for this user as canceled.
+        # Keep ordering: opened schedule is marked DONE first.
+        inflight_canceled = (
             session.query(Schedule)
             .filter(
                 Schedule.user_id == user_id,
-                Schedule.state == ScheduleState.PENDING,
+                Schedule.state.in_([ScheduleState.PENDING, ScheduleState.PROCESSING]),
             )
             .update(
                 {
@@ -1074,7 +1077,7 @@ async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, A
 
     print(
         f"[{datetime.now()}] process_plan_modal_submit saved schedules: "
-        f"pending_canceled={pending_canceled} "
+        f"inflight_canceled={inflight_canceled} "
         f"user_id={user_id} remind_count={len(remind_rows_to_save)} "
         f"next_plan={next_plan['date']} {next_plan['time']} "
         f"db={_SESSION_DB_URL}"
@@ -1253,6 +1256,41 @@ def _calc_no_streak_count(session, user_id: str) -> int:
     return max(streak, 1)
 
 
+def _safe_int(value: object, default: int) -> int:
+    """Convert config-like value to int with fallback."""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _count_today_zap_executions(session, user_id: str) -> int:
+    """Count today's zap executions represented in punishment records."""
+    from sqlalchemy import and_, or_
+
+    now = datetime.now()
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+
+    return (
+        session.query(Punishment.id)
+        .join(Schedule, Punishment.schedule_id == Schedule.id)
+        .filter(
+            Schedule.user_id == user_id,
+            Punishment.created_at >= day_start,
+            Punishment.created_at < day_end,
+            or_(
+                Punishment.mode == PunishmentMode.NO,
+                and_(
+                    Punishment.mode == PunishmentMode.IGNORE,
+                    Punishment.count >= 2,
+                ),
+            ),
+        )
+        .count()
+    )
+
+
 def _load_punishment_for_no(session, user_id: str, no_count: int) -> dict[str, Any]:
     """Build punishment display data from user config and NO streak count."""
     config_rows = (
@@ -1297,6 +1335,38 @@ async def _send_no_punishment(
     except (TypeError, ValueError):
         value = 35
     value = max(0, min(100, value))
+
+    if stimulus_type == "zap":
+        from backend.worker.config_cache import get_config
+
+        session = _get_session()
+        try:
+            zap_limit = _safe_int(
+                get_config("LIMIT_DAY_PAVLOK_COUNTS", 100, session=session),
+                100,
+            )
+            if zap_limit <= 0:
+                zap_limit = 1
+            zap_count = _count_today_zap_executions(session, user_id)
+        except Exception as exc:
+            print(
+                f"[{datetime.now()}] no-punishment skipped: "
+                f"user_id={user_id} schedule_id={schedule_id} "
+                f"reason=failed to evaluate daily zap limit detail={exc}"
+            )
+            return
+        finally:
+            session.close()
+
+        # NO punishment row is inserted before this async sender runs,
+        # so ">" keeps the current trigger allowed and blocks excess sends.
+        if zap_count > zap_limit:
+            print(
+                f"[{datetime.now()}] no-punishment skipped: "
+                f"user_id={user_id} schedule_id={schedule_id} "
+                f"reason=daily zap limit reached limit={zap_limit} count={zap_count}"
+            )
+            return
 
     def _send() -> tuple[bool, str]:
         try:
@@ -1463,6 +1533,24 @@ async def process_remind_response(payload_data: Dict[str, Any], action: str = "Y
                 result=action_result,
             )
         )
+        if action_value == "NO":
+            existing_no_punishment = (
+                session.query(Punishment.id)
+                .filter(
+                    Punishment.schedule_id == schedule.id,
+                    Punishment.mode == PunishmentMode.NO,
+                    Punishment.count == 1,
+                )
+                .first()
+            )
+            if not existing_no_punishment:
+                session.add(
+                    Punishment(
+                        schedule_id=schedule.id,
+                        mode=PunishmentMode.NO,
+                        count=1,
+                    )
+                )
         schedule.state = ScheduleState.DONE
         schedule.updated_at = datetime.now()
         session.commit()

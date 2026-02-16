@@ -1,7 +1,16 @@
 """Ignore Mode Detection Module"""
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Any
+
 from sqlalchemy.orm import Session
+
+
+def _safe_int(value: object, default: int) -> int:
+    """Convert config-like value to int with fallback."""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
 
 
 def calculate_ignore_punishment(ignore_time: int) -> Dict[str, Any]:
@@ -12,17 +21,80 @@ def calculate_ignore_punishment(ignore_time: int) -> Dict[str, Any]:
         ignore_time: ignore回数（IGNORE_INTERVAL単位）
 
     Returns:
-        {"mode": PunishmentMode, "count": int}
+        {"type": str, "value": int}
     """
-    from backend.models import PunishmentMode
+    if ignore_time <= 1:
+        return {"type": "vibe", "value": 100}
 
-    if ignore_time == 1:
-        # 初回はIGNORE:100
-        return {"mode": PunishmentMode.IGNORE, "count": 100}
-    else:
-        # 2回目以降はzap: min(35 + 10 * (ignore_time - 2), 100)
-        zap_value = min(35 + 10 * (ignore_time - 2), 100)
-        return {"mode": PunishmentMode.ZAP, "count": zap_value}
+    # 2回目以降はzap: min(35 + 10 * (ignore_time - 2), 100)
+    zap_value = min(35 + 10 * (ignore_time - 2), 100)
+    return {"type": "zap", "value": zap_value}
+
+
+def _send_punishment(stimulus_type: str, value: int) -> bool:
+    """Send Pavlok stimulus. Return True on success."""
+    try:
+        from backend.pavlok_lib import PavlokClient
+
+        client = PavlokClient()
+        result = client.stimulate(stimulus_type=stimulus_type, value=value)
+    except Exception:
+        return False
+
+    return bool(isinstance(result, dict) and result.get("success"))
+
+
+def _mark_auto_ignore_once(session: Session, schedule, now: datetime) -> None:
+    """Mark schedule canceled and append AUTO_IGNORE action once."""
+    from backend.models import ScheduleState, ActionLog, ActionResult
+
+    schedule.state = ScheduleState.CANCELED
+    schedule.updated_at = now
+
+    existing_auto_ignore = (
+        session.query(ActionLog.id)
+        .filter(
+            ActionLog.schedule_id == schedule.id,
+            ActionLog.result == ActionResult.AUTO_IGNORE,
+        )
+        .first()
+    )
+    if not existing_auto_ignore:
+        session.add(
+            ActionLog(
+                schedule_id=schedule.id,
+                result=ActionResult.AUTO_IGNORE,
+            )
+        )
+
+
+def _count_today_zap_executions(session: Session, user_id: str) -> int:
+    """Count today's zap executions from punishment records for the user."""
+    from sqlalchemy import and_, or_
+    from backend.models import Punishment, PunishmentMode, Schedule
+
+    now = datetime.now()
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start.replace(day=day_start.day) + (day_start - day_start)  # keep type
+    day_end = day_start.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    return (
+        session.query(Punishment.id)
+        .join(Schedule, Punishment.schedule_id == Schedule.id)
+        .filter(
+            Schedule.user_id == user_id,
+            Punishment.created_at >= day_start,
+            Punishment.created_at <= day_end,
+            or_(
+                Punishment.mode == PunishmentMode.NO,
+                and_(
+                    Punishment.mode == PunishmentMode.IGNORE,
+                    Punishment.count >= 2,
+                ),
+            ),
+        )
+        .count()
+    )
 
 
 def detect_ignore_mode(session: Session, schedule) -> Dict[str, Any]:
@@ -37,47 +109,71 @@ def detect_ignore_mode(session: Session, schedule) -> Dict[str, Any]:
         {"detected": bool, "ignore_time": int}
     """
     from backend.models import Punishment, PunishmentMode
+    from backend.worker.config_cache import get_config
 
-    # Get IGNORE_INTERVAL (default 900 seconds = 15 minutes)
     now = datetime.now()
     if isinstance(schedule.run_at, datetime):
-        ignore_interval = int((now - schedule.run_at).total_seconds())
+        elapsed_seconds = int((now - schedule.run_at).total_seconds())
     else:
-        ignore_interval = int(now.timestamp() - schedule.run_at)
+        elapsed_seconds = int(now.timestamp() - schedule.run_at)
 
-    from backend.worker.config_cache import get_config
-    config_interval = get_config("IGNORE_INTERVAL", 900)
+    config_interval = _safe_int(get_config("IGNORE_INTERVAL", 900), 900)
+    if config_interval <= 0:
+        config_interval = 900
 
-    # Check if IGNORE_INTERVAL has passed
-    if ignore_interval < config_interval:
+    if elapsed_seconds < config_interval:
         return {"detected": False, "ignore_time": 0}
 
-    # Calculate ignore_time
-    ignore_time = ignore_interval // config_interval
+    ignore_time = elapsed_seconds // config_interval
 
-    # Check if punishment already exists (check all, not just exact match)
-    existing = session.query(Punishment).filter_by(schedule_id=schedule.id).all()
-
-    # Determine if we need to create a new punishment
-    needs_new_punishment = True
-    for existing_pun in existing:
-        if existing_pun.mode == PunishmentMode.IGNORE and existing_pun.count == ignore_time:
-            # Exact match exists, don't create new one
-            needs_new_punishment = False
-            break
-
-    if not needs_new_punishment:
+    existing_same_trigger = (
+        session.query(Punishment.id)
+        .filter(
+            Punishment.schedule_id == schedule.id,
+            Punishment.mode == PunishmentMode.IGNORE,
+            Punishment.count == ignore_time,
+        )
+        .first()
+    )
+    if existing_same_trigger:
         return {"detected": True, "ignore_time": ignore_time}
 
-    # Create new punishment
+    ignore_max_retry = _safe_int(get_config("IGNORE_MAX_RETRY", 5), 5)
+    if ignore_max_retry <= 0:
+        ignore_max_retry = 1
+
+    if ignore_time > ignore_max_retry:
+        _mark_auto_ignore_once(session, schedule, now)
+        session.commit()
+        return {"detected": True, "ignore_time": ignore_time}
+
     punishment_data = calculate_ignore_punishment(ignore_time)
+    stimulus_type = str(punishment_data["type"])
+    value = int(punishment_data["value"])
 
-    punishment = Punishment(
-        schedule_id=schedule.id,
-        mode=punishment_data["mode"],
-        count=punishment_data["count"]
+    if stimulus_type == "zap":
+        zap_limit = _safe_int(get_config("LIMIT_DAY_PAVLOK_COUNTS", 100), 100)
+        if zap_limit <= 0:
+            zap_limit = 1
+        zap_count = _count_today_zap_executions(session, str(schedule.user_id))
+        if zap_count >= zap_limit:
+            return {"detected": True, "ignore_time": ignore_time}
+
+    # If the Pavlok call fails, do not record the trigger index so it can retry.
+    sent = _send_punishment(stimulus_type=stimulus_type, value=value)
+    if not sent:
+        return {"detected": False, "ignore_time": ignore_time}
+
+    session.add(
+        Punishment(
+            schedule_id=schedule.id,
+            mode=PunishmentMode.IGNORE,
+            count=ignore_time,
+        )
     )
-    session.add(punishment)
-    session.commit()
 
+    if stimulus_type == "zap" and value >= 100:
+        _mark_auto_ignore_once(session, schedule, now)
+
+    session.commit()
     return {"detected": True, "ignore_time": ignore_time}
