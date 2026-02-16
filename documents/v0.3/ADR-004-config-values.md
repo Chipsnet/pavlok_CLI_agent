@@ -16,7 +16,7 @@ v0.3_design.mdとv0.3_slack_ui_spec.mdで設定値の定義に差分がある。
 | 設定キー | デフォルト | 型 | 範囲 | UI表示 | 使用箇所 |
 |---------|-----------|-----|------|--------|---------|
 | `PAVLOK_TYPE_PUNISH` | zap | str | zap,beep,vibe | static_select | Worker: NO時の罰タイプ |
-| `PAVLOK_VALUE_PUNISH` | 50 | int | 0-100 | plain_text_input | Worker: NO時の罰強度 |
+| `PAVLOK_VALUE_PUNISH` | 35 | int | 0-100 | plain_text_input | Worker: NO時の罰強度 |
 | `LIMIT_DAY_PAVLOK_COUNTS` | 100 | int | 1-1000 | plain_text_input | Worker: 日次ZAP上限 |
 | `LIMIT_PAVLOK_ZAP_VALUE` | 100 | int | 1-100 | plain_text_input | Worker: ZAP強度ハードリミット |
 | `IGNORE_INTERVAL` | 900 | int | 300-1800 | static_select | Worker: ignore検知間隔(秒) |
@@ -84,7 +84,7 @@ CONFIG_DEFINITIONS = {
     },
     "PAVLOK_VALUE_PUNISH": {
         "type": "int",
-        "default": 50,
+        "default": 35,
         "min": 0,
         "max": 100,
         "description": "デフォルト罰強度"

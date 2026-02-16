@@ -94,7 +94,7 @@ AUTHORIZED_USERS=U03JBULT484
 | 設定キー | デフォルト | 説明 |
 |---------|-----------|------|
 | PAVLOK_TYPE_PUNISH | zap | 罰の種類 (zap/vibe/beep) |
-| PAVLOK_VALUE_PUNISH | 50 | 罰の強度 (0-100) |
+| PAVLOK_VALUE_PUNISH | 35 | 罰の強度 (0-100) |
 | LIMIT_DAY_PAVLOK_COUNTS | 100 | 1日の最大ZAP回数 |
 | LIMIT_PAVLOK_ZAP_VALUE | 100 | 最大ZAP強度 |
 | IGNORE_INTERVAL | 900 | ignore検知間隔（秒） |

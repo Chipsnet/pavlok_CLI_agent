@@ -19,7 +19,7 @@ async def get_configurations(request: Request) -> Dict[str, Any]:
         "data": {
             "configurations": {
                 "PAVLOK_TYPE_PUNISH": "beep",
-                "PAVLOK_VALUE_PUNISH": 50,
+                "PAVLOK_VALUE_PUNISH": 35,
                 "IGNORE_LIMIT": 3,
                 "REMIND_ENABLED": True
             }

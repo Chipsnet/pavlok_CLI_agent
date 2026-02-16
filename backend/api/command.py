@@ -26,7 +26,7 @@ CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "value_type": ConfigValueType.STR,
         "allowed": {"zap", "vibe", "beep"},
     },
-    "PAVLOK_VALUE_PUNISH": {"default": "50", "value_type": ConfigValueType.INT},
+    "PAVLOK_VALUE_PUNISH": {"default": "35", "value_type": ConfigValueType.INT},
     "LIMIT_DAY_PAVLOK_COUNTS": {"default": "100", "value_type": ConfigValueType.INT},
     "LIMIT_PAVLOK_ZAP_VALUE": {"default": "100", "value_type": ConfigValueType.INT},
     "IGNORE_INTERVAL": {"default": "900", "value_type": ConfigValueType.INT},

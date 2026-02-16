@@ -1269,7 +1269,7 @@ def _load_punishment_for_no(session, user_id: str, no_count: int) -> dict[str, A
 
     punish_type = config_map.get("PAVLOK_TYPE_PUNISH", "zap")
     try:
-        base_value = int(config_map.get("PAVLOK_VALUE_PUNISH", "50"))
+        base_value = int(config_map.get("PAVLOK_VALUE_PUNISH", "35"))
     except ValueError:
         base_value = 50
     try:
@@ -1293,9 +1293,9 @@ async def _send_no_punishment(
         stimulus_type = "zap"
 
     try:
-        value = int(punishment.get("value", 50))
+        value = int(punishment.get("value", 35))
     except (TypeError, ValueError):
-        value = 50
+        value = 35
     value = max(0, min(100, value))
 
     def _send() -> tuple[bool, str]:

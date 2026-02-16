@@ -179,6 +179,12 @@ class TestBlockKitConfig:
         from backend.slack_ui import config_modal
 
         modal = config_modal({})
+        value_block = next(
+            (b for b in modal["blocks"] if b.get("block_id") == "PAVLOK_VALUE_PUNISH"),
+            None,
+        )
+        assert value_block is not None
+        assert value_block["element"]["initial_value"] == "35"
 
         actions_blocks = [b for b in modal["blocks"] if b.get("type") == "actions"]
         assert len(actions_blocks) >= 1

@@ -515,7 +515,7 @@ class BlockKitBuilder:
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "PAVLOK_VALUE_PUNISH_input",
-                    "initial_value": config_values.get("PAVLOK_VALUE_PUNISH", "50"),
+                    "initial_value": config_values.get("PAVLOK_VALUE_PUNISH", "35"),
                     "placeholder": {
                         "type": "plain_text",
                         "text": "0-100の数値"
