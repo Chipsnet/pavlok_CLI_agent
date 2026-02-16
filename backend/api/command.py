@@ -280,6 +280,66 @@ def _save_user_configs(user_id: str, updates: dict[str, str]) -> int:
         session.close()
 
 
+def _set_system_paused(user_id: str, paused: bool) -> bool:
+    """Upsert SYSTEM_PAUSED config and invalidate local cache."""
+    paused_value = "true" if paused else "false"
+    changed_by = user_id if user_id else "system"
+    now = datetime.now()
+
+    session = _get_session()
+    try:
+        row = (
+            session.query(Configuration)
+            .filter(Configuration.key == "SYSTEM_PAUSED")
+            .first()
+        )
+        old_value = row.value if row else None
+
+        if row is None:
+            row = Configuration(
+                user_id=changed_by,
+                key="SYSTEM_PAUSED",
+                value=paused_value,
+                value_type=ConfigValueType.BOOL,
+                default_value="false",
+                version=1,
+                description="Pause worker cycle execution",
+            )
+            session.add(row)
+        else:
+            row.value = paused_value
+            row.value_type = ConfigValueType.BOOL
+            row.default_value = "false"
+            row.version = (row.version or 0) + 1
+            row.updated_at = now
+
+        session.add(
+            ConfigAuditLog(
+                config_key="SYSTEM_PAUSED",
+                old_value=old_value,
+                new_value=paused_value,
+                changed_by=changed_by,
+                changed_at=now,
+                change_source=ChangeSource.SLACK_COMMAND,
+            )
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    # Invalidate local config cache in this process.
+    try:
+        from backend.worker.config_cache import invalidate_config_cache
+        invalidate_config_cache("SYSTEM_PAUSED")
+    except Exception:
+        pass
+
+    return old_value != paused_value
+
+
 async def process_base_commit(request) -> Dict[str, Any]:
     """
     ベースコミットコマンド処理
@@ -385,6 +445,17 @@ async def process_stop(request) -> Dict[str, Any]:
     """
     from backend.slack_ui import stop_notification
 
+    request_map = request if isinstance(request, Mapping) else {}
+    user_id = request_map.get("user_id", "")
+    if not isinstance(user_id, str):
+        user_id = ""
+
+    changed = _set_system_paused(user_id=user_id, paused=True)
+    print(
+        f"[{datetime.now()}] process_stop applied SYSTEM_PAUSED=true "
+        f"user_id={user_id or 'system'} changed={changed}"
+    )
+
     blocks = stop_notification()
     return {
         "status": "success",
@@ -405,6 +476,17 @@ async def process_restart(request) -> Dict[str, Any]:
         Dict[str, Any]: 処理結果
     """
     from backend.slack_ui import restart_notification
+
+    request_map = request if isinstance(request, Mapping) else {}
+    user_id = request_map.get("user_id", "")
+    if not isinstance(user_id, str):
+        user_id = ""
+
+    changed = _set_system_paused(user_id=user_id, paused=False)
+    print(
+        f"[{datetime.now()}] process_restart applied SYSTEM_PAUSED=false "
+        f"user_id={user_id or 'system'} changed={changed}"
+    )
 
     blocks = restart_notification()
     return {

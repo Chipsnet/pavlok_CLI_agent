@@ -87,24 +87,77 @@ class TestCommandApi:
         assert time3["element"].get("initial_time") == "21:00"
 
     @pytest.mark.asyncio
-    async def test_stop_command(self, v3_db_session, v3_test_data_factory):
-        schedule = v3_test_data_factory.create_schedule()
+    async def test_stop_command(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "stop_command.db"
+        database_url = f"sqlite:///{db_path}"
+        engine = create_engine(database_url, connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
-        request = MagicMock(spec=Request)
-        request.state = "stop"
-        result = await process_stop(request)
+        monkeypatch.setenv("DATABASE_URL", database_url)
+        monkeypatch.setattr("backend.api.command._SESSION_FACTORY", None)
+        monkeypatch.setattr("backend.api.command._SESSION_DB_URL", None)
+
+        result = await process_stop({"user_id": "U_TEST"})
         assert result["status"] == "success"
         assert "blocks" in result
+
+        session = Session()
+        try:
+            row = (
+                session.query(Configuration)
+                .filter(Configuration.key == "SYSTEM_PAUSED")
+                .first()
+            )
+            assert row is not None
+            assert row.value == "true"
+            assert row.value_type == ConfigValueType.BOOL
+        finally:
+            session.close()
 
     @pytest.mark.asyncio
-    async def test_restart_command(self, v3_db_session, v3_test_data_factory):
-        schedule = v3_test_data_factory.create_schedule()
+    async def test_restart_command(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "restart_command.db"
+        database_url = f"sqlite:///{db_path}"
+        engine = create_engine(database_url, connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
-        request = MagicMock(spec=Request)
-        request.state = "restart"
-        result = await process_restart(request)
+        monkeypatch.setenv("DATABASE_URL", database_url)
+        monkeypatch.setattr("backend.api.command._SESSION_FACTORY", None)
+        monkeypatch.setattr("backend.api.command._SESSION_DB_URL", None)
+
+        session = Session()
+        try:
+            session.add(
+                Configuration(
+                    user_id="U_TEST",
+                    key="SYSTEM_PAUSED",
+                    value="true",
+                    value_type=ConfigValueType.BOOL,
+                    default_value="false",
+                )
+            )
+            session.commit()
+        finally:
+            session.close()
+
+        result = await process_restart({"user_id": "U_TEST"})
         assert result["status"] == "success"
         assert "blocks" in result
+
+        session = Session()
+        try:
+            row = (
+                session.query(Configuration)
+                .filter(Configuration.key == "SYSTEM_PAUSED")
+                .first()
+            )
+            assert row is not None
+            assert row.value == "false"
+            assert row.value_type == ConfigValueType.BOOL
+        finally:
+            session.close()
 
     @pytest.mark.asyncio
     async def test_config_get_command(self, v3_db_session):

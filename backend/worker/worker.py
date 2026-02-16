@@ -11,6 +11,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 
+from backend.worker.config_cache import get_config, invalidate_config_cache
+
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,17 @@ class PunishmentWorker:
             session: DBセッション
         """
         self.session = session
+
+    @staticmethod
+    def _as_bool(value: object) -> bool:
+        """Normalize config value to bool safely."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return False
 
     def _resolve_bootstrap_user_id(self) -> Optional[str]:
         """
@@ -218,6 +231,13 @@ class PunishmentWorker:
         """
         1回分の処理を実行する
         """
+        # SYSTEM_PAUSED is operationally critical; always refresh it per cycle.
+        invalidate_config_cache("SYSTEM_PAUSED")
+        system_paused = get_config("SYSTEM_PAUSED", False, session=self.session)
+        if self._as_bool(system_paused):
+            logger.info("SYSTEM_PAUSED=true, skipping worker cycle")
+            return
+
         try:
             await self.ensure_initial_plan_schedule()
         except Exception as e:
