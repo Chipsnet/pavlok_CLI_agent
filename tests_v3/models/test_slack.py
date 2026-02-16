@@ -128,6 +128,7 @@ class TestBlockKitBuilder:
             "PAVLOK_TYPE_PUNISH": "zap",
             "PAVLOK_VALUE_PUNISH": "50",
             "IGNORE_INTERVAL": "900",
+            "COACH_CHARACTOR": "ラムちゃん",
         }
 
         modal = BlockKitBuilder.config_modal(config_values=config_values)
@@ -142,6 +143,13 @@ class TestBlockKitBuilder:
         # Check for input blocks with config keys
         input_blocks = [b for b in blocks if b.get("type") == "input"]
         assert len(input_blocks) > 0
+
+        coach_block = next(
+            (b for b in blocks if b.get("block_id") == "COACH_CHARACTOR"),
+            None,
+        )
+        assert coach_block is not None
+        assert coach_block["element"]["initial_value"] == "ラムちゃん"
 
     def test_stop_notification_ephemeral(self):
         """Test stop command ephemeral notification"""

@@ -483,12 +483,55 @@ def _timeout_section(config_values: dict[str, str]) -> list[dict[str, Any]]:
     ]
 
 
+def _coach_section(config_values: dict[str, str]) -> list[dict[str, Any]]:
+    """Generate coach character configuration section."""
+    return [
+        {
+            "type": "divider",
+        },
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": "💬 コーチ口調設定",
+            },
+        },
+        {
+            "type": "input",
+            "block_id": "COACH_CHARACTOR",
+            "label": {
+                "type": "plain_text",
+                "text": "キャラクター",
+            },
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "COACH_CHARACTOR_input",
+                "initial_value": config_values.get(
+                    "COACH_CHARACTOR",
+                    "うる星やつらのラムちゃん",
+                ),
+                "placeholder": {
+                    "type": "plain_text",
+                    "text": "例: うる星やつらのラムちゃん",
+                },
+                "min_length": 1,
+                "max_length": 100,
+            },
+            "hint": {
+                "type": "plain_text",
+                "text": "agent_callのコメント生成時に使用されます。",
+            },
+        },
+    ]
+
+
 def config_modal(config_values: dict[str, str]) -> dict[str, Any]:
     """Generate /config modal"""
     blocks = []
     blocks.extend(_punishment_section(config_values))
     blocks.extend(_ignore_section(config_values))
     blocks.extend(_timeout_section(config_values))
+    blocks.extend(_coach_section(config_values))
 
     # Add action buttons
     blocks.append({

@@ -10,9 +10,36 @@ import requests
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from backend.models import Commitment
+from backend.models import (
+    Commitment,
+    Configuration,
+    ConfigAuditLog,
+    ConfigValueType,
+    ChangeSource,
+)
 
 MAX_COMMITMENT_ROWS = 10
+DEFAULT_COACH_CHARACTOR = "うる星やつらのラムちゃん"
+CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
+    "PAVLOK_TYPE_PUNISH": {
+        "default": "zap",
+        "value_type": ConfigValueType.STR,
+        "allowed": {"zap", "vibe", "beep"},
+    },
+    "PAVLOK_VALUE_PUNISH": {"default": "50", "value_type": ConfigValueType.INT},
+    "LIMIT_DAY_PAVLOK_COUNTS": {"default": "100", "value_type": ConfigValueType.INT},
+    "LIMIT_PAVLOK_ZAP_VALUE": {"default": "100", "value_type": ConfigValueType.INT},
+    "IGNORE_INTERVAL": {"default": "900", "value_type": ConfigValueType.INT},
+    "IGNORE_JUDGE_TIME": {"default": "3", "value_type": ConfigValueType.INT},
+    "IGNORE_MAX_RETRY": {"default": "5", "value_type": ConfigValueType.INT},
+    "TIMEOUT_REMIND": {"default": "600", "value_type": ConfigValueType.INT},
+    "TIMEOUT_REVIEW": {"default": "600", "value_type": ConfigValueType.INT},
+    "RETRY_DELAY": {"default": "5", "value_type": ConfigValueType.INT},
+    "COACH_CHARACTOR": {
+        "default": DEFAULT_COACH_CHARACTOR,
+        "value_type": ConfigValueType.STR,
+    },
+}
 
 _SESSION_FACTORY = None
 _SESSION_DB_URL = None
@@ -101,6 +128,156 @@ def _open_slack_modal(trigger_id: str, view: Dict[str, Any]) -> tuple[bool, str]
         return False, error
 
     return True, "ok"
+
+
+def _parse_private_metadata(raw_metadata: str) -> dict[str, str]:
+    """Parse Slack view private_metadata JSON safely."""
+    if not raw_metadata:
+        return {}
+    try:
+        parsed = json.loads(raw_metadata)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(k): str(v) for k, v in parsed.items()}
+
+
+def _load_user_config_values(user_id: str) -> dict[str, str]:
+    """Load config values for user with defaults."""
+    values = {
+        key: str(definition["default"])
+        for key, definition in CONFIG_DEFINITIONS.items()
+    }
+    if not user_id:
+        return values
+
+    session = _get_session()
+    try:
+        rows = (
+            session.query(Configuration)
+            .filter(
+                Configuration.user_id == user_id,
+                Configuration.key.in_(list(CONFIG_DEFINITIONS.keys())),
+            )
+            .all()
+        )
+        for row in rows:
+            values[row.key] = str(row.value)
+    except Exception as exc:
+        print(f"[{datetime.now()}] failed to load configs for modal: {exc}")
+    finally:
+        session.close()
+    return values
+
+
+def _extract_config_updates_from_view(
+    state_values: dict[str, Any],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Extract config values from config_submit state and validate."""
+    updates: dict[str, str] = {}
+    errors: dict[str, str] = {}
+
+    for key, definition in CONFIG_DEFINITIONS.items():
+        block = state_values.get(key, {})
+        if not isinstance(block, dict):
+            continue
+
+        raw_value = ""
+        payload = next((v for v in block.values() if isinstance(v, dict)), {})
+        if "selected_option" in payload:
+            selected = payload.get("selected_option", {})
+            if isinstance(selected, dict):
+                raw_value = str(selected.get("value", "") or "")
+        elif "value" in payload:
+            raw_value = str(payload.get("value", "") or "").strip()
+
+        if raw_value == "":
+            continue
+
+        allowed = definition.get("allowed")
+        if isinstance(allowed, set) and raw_value not in allowed:
+            errors[key] = "選択値が不正です。"
+            continue
+
+        if definition["value_type"] == ConfigValueType.INT:
+            try:
+                int(raw_value)
+            except ValueError:
+                errors[key] = "数値で入力してください。"
+                continue
+
+        if key == "COACH_CHARACTOR" and len(raw_value) > 100:
+            errors[key] = "100文字以内で入力してください。"
+            continue
+
+        updates[key] = raw_value
+
+    return updates, errors
+
+
+def _save_user_configs(user_id: str, updates: dict[str, str]) -> int:
+    """Upsert user configuration values and append audit logs."""
+    if not user_id or not updates:
+        return 0
+
+    now = datetime.now()
+    changed_count = 0
+    session = _get_session()
+    try:
+        for key, new_value in updates.items():
+            definition = CONFIG_DEFINITIONS.get(key)
+            if not definition:
+                continue
+
+            row = (
+                session.query(Configuration)
+                .filter(
+                    Configuration.user_id == user_id,
+                    Configuration.key == key,
+                )
+                .first()
+            )
+            old_value = row.value if row else None
+            if old_value == new_value:
+                continue
+
+            if row is None:
+                row = Configuration(
+                    user_id=user_id,
+                    key=key,
+                    value=new_value,
+                    value_type=definition["value_type"],
+                    default_value=str(definition["default"]),
+                    version=1,
+                    description=f"Configured via /config ({key})",
+                )
+                session.add(row)
+            else:
+                row.value = new_value
+                row.value_type = definition["value_type"]
+                row.version = (row.version or 0) + 1
+                row.updated_at = now
+
+            session.add(
+                ConfigAuditLog(
+                    config_key=key,
+                    old_value=old_value,
+                    new_value=new_value,
+                    changed_by=user_id,
+                    changed_at=now,
+                    change_source=ChangeSource.SLACK_COMMAND,
+                )
+            )
+            changed_count += 1
+
+        session.commit()
+        return changed_count
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 async def process_base_commit(request) -> Dict[str, Any]:
@@ -249,24 +426,134 @@ async def process_config(request, config_data: Dict[str, Any] = None) -> Dict[st
     Returns:
         Dict[str, Any]: 処理結果
     """
-    # TODO: Implement actual config processing with database
+    request_map = request if isinstance(request, Mapping) else {}
+
+    # Interactive config modal submit (view_submission).
+    view = request_map.get("view") if isinstance(request_map, Mapping) else None
+    if isinstance(view, Mapping) and view.get("callback_id") == "config_submit":
+        payload_user = request_map.get("user", {})
+        user_id = payload_user.get("id", "") if isinstance(payload_user, Mapping) else ""
+        metadata = _parse_private_metadata(str(view.get("private_metadata", "") or ""))
+        if not user_id:
+            user_id = metadata.get("user_id", "")
+
+        state = view.get("state", {})
+        state_values = (
+            state.get("values", {})
+            if isinstance(state, Mapping)
+            else {}
+        )
+        updates, errors = _extract_config_updates_from_view(
+            state_values if isinstance(state_values, dict) else {}
+        )
+        if errors:
+            return {
+                "response_action": "errors",
+                "errors": errors,
+            }
+
+        try:
+            changed_count = _save_user_configs(user_id, updates)
+        except Exception as exc:
+            print(f"[{datetime.now()}] process_config save error: {exc}")
+            return {
+                "response_action": "errors",
+                "errors": {
+                    "COACH_CHARACTOR": "設定保存に失敗しました。再度お試しください。"
+                },
+            }
+
+        print(
+            f"[{datetime.now()}] config_submit saved: "
+            f"user_id={user_id} changed={changed_count}"
+        )
+        return {
+            "response_action": "clear",
+        }
+
+    # Slash command path: open /config modal via views.open.
+    trigger_id = request_map.get("trigger_id", "")
+    if not isinstance(trigger_id, str):
+        trigger_id = ""
+    if trigger_id:
+        from backend.slack_ui import config_modal
+
+        user_id = request_map.get("user_id", "")
+        channel_id = request_map.get("channel_id", "")
+        response_url = request_map.get("response_url", "")
+
+        if not isinstance(user_id, str):
+            user_id = ""
+        if not isinstance(channel_id, str):
+            channel_id = ""
+        if not isinstance(response_url, str):
+            response_url = ""
+
+        current_values = _load_user_config_values(user_id)
+        view_payload = config_modal(current_values)
+        private_metadata: dict[str, str] = {}
+        if user_id:
+            private_metadata["user_id"] = user_id
+        if channel_id:
+            private_metadata["channel_id"] = channel_id
+        if response_url:
+            private_metadata["response_url"] = response_url
+        if private_metadata:
+            view_payload["private_metadata"] = json.dumps(
+                private_metadata,
+                ensure_ascii=False,
+            )
+
+        ok, reason = await asyncio.to_thread(_open_slack_modal, trigger_id, view_payload)
+        if ok:
+            return {
+                "status": "success",
+                "response_type": "ephemeral",
+                "text": "設定モーダルを開きました。",
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "⚙️ 設定モーダルを開きました。",
+                        },
+                    }
+                ],
+            }
+
+        return {
+            "status": "success",
+            "response_type": "ephemeral",
+            "text": f"設定モーダルを開けませんでした: {reason}",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f":warning: 設定モーダルを開けませんでした: {reason}",
+                    },
+                }
+            ],
+        }
+
+    # Backward-compatible path used in unit tests.
     method = getattr(request, "method", "GET")
     if method == "GET":
         return {
             "status": "success",
             "response_type": "ephemeral",
             "text": "現在の設定を表示します。",
-            "data": {"configurations": {}}
+            "data": {"configurations": _load_user_config_values("")},
         }
-    elif method == "POST" and config_data:
+    if method == "POST" and config_data:
         return {
             "status": "success",
             "response_type": "ephemeral",
             "text": "設定を更新しました",
-            "data": config_data
+            "data": config_data,
         }
     return {
         "status": "success",
         "response_type": "ephemeral",
-        "text": "設定処理完了"
+        "text": "設定処理完了",
     }

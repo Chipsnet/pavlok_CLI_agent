@@ -2,14 +2,24 @@
 import asyncio
 import json
 import os
+import subprocess
+import sys
 from datetime import datetime, timedelta, time as dt_time
+from pathlib import Path
 from typing import Dict, Any
 
 import requests
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from backend.models import Commitment, Schedule, ScheduleState, EventType
+from backend.models import (
+    Commitment,
+    Schedule,
+    ScheduleState,
+    EventType,
+    ActionLog,
+    ActionResult,
+)
 
 MAX_COMMITMENT_ROWS = 10
 MIN_COMMITMENT_ROWS = 3
@@ -270,6 +280,28 @@ async def _notify_plan_saved(
     }
 
     def _post() -> tuple[bool, str]:
+        def _call_chat_update(target_channel: str, message_ts: str) -> tuple[bool, str]:
+            try:
+                update_resp = requests.post(
+                    "https://slack.com/api/chat.update",
+                    headers=headers,
+                    json={
+                        "channel": target_channel,
+                        "ts": message_ts,
+                        "text": text,
+                        "blocks": blocks,
+                        "link_names": True,
+                    },
+                    timeout=2.5,
+                )
+                update_body = update_resp.json()
+            except (requests.RequestException, ValueError) as exc:
+                return False, f"chat.update failed: {exc}"
+
+            if not update_body.get("ok"):
+                return False, f"chat.update error: {update_body.get('error')}"
+            return True, "ok"
+
         def _open_dm_channel() -> tuple[str, str]:
             try:
                 open_resp = requests.post(
@@ -317,6 +349,13 @@ async def _notify_plan_saved(
                 return False, f"chat.postMessage error: {post_body.get('error')}"
             return True, "ok"
 
+        if channel_id and thread_ts:
+            ok, reason = _call_chat_update(channel_id, thread_ts)
+            if ok:
+                return True, "ok(update)"
+            if "message_not_found" not in reason and "cant_update_message" not in reason:
+                return False, reason
+
         target_channel = channel_id
         if target_channel:
             ok, reason = _post_message(target_channel, thread_ts)
@@ -338,6 +377,42 @@ async def _notify_plan_saved(
         )
     else:
         print(f"[{datetime.now()}] plan-submit notification failed: {reason}")
+
+
+async def _run_agent_call(schedule_ids: list[str]) -> None:
+    """Run scripts/agent_call.py to fill schedule comments."""
+    if not schedule_ids:
+        return
+
+    def _run() -> tuple[bool, str]:
+        repo_root = Path(__file__).resolve().parents[2]
+        script_path = repo_root / "scripts" / "agent_call.py"
+        if not script_path.is_file():
+            return False, f"agent_call script not found: {script_path}"
+
+        env = os.environ.copy()
+        env["SCHEDULE_IDS_JSON"] = json.dumps(schedule_ids, ensure_ascii=False)
+        result = subprocess.run(
+            [sys.executable, str(script_path)],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            stdout = (result.stdout or "").strip()
+            detail = stderr or stdout or f"exit={result.returncode}"
+            return False, detail
+        return True, (result.stdout or "ok").strip()
+
+    ok, reason = await asyncio.to_thread(_run)
+    if ok:
+        print(
+            f"[{datetime.now()}] agent_call succeeded: "
+            f"schedule_count={len(schedule_ids)}"
+        )
+    else:
+        print(f"[{datetime.now()}] agent_call failed: {reason}")
 
 
 def _current_commitments_from_view(view: Dict[str, Any]) -> list[dict[str, str]]:
@@ -865,17 +940,21 @@ async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, A
     active_commitments = _load_active_commitments_for_user(user_id)
 
     remind_rows_to_save: list[dict[str, Any]] = []
+    skipped_task_names: list[str] = []
     scheduled_tasks_for_message: list[dict[str, str]] = []
     for row in task_rows:
-        if row["skip"]:
-            continue
-        run_at = _resolve_relative_datetime(row["date"], row["time"])
         commitment_idx = row["index"] - 1
         task_name = (
             active_commitments[commitment_idx]["task"]
             if 0 <= commitment_idx < len(active_commitments)
             else f"タスク{row['index']}"
         )
+
+        if row["skip"]:
+            skipped_task_names.append(task_name)
+            continue
+
+        run_at = _resolve_relative_datetime(row["date"], row["time"])
         remind_rows_to_save.append({"run_at": run_at, "task": task_name})
 
         scheduled_tasks_for_message.append(
@@ -896,6 +975,8 @@ async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, A
     now = datetime.now()
     thread_ts = ""
     pending_canceled = 0
+    inserted_remind_schedule_ids: list[str] = []
+    opened_plan_schedule_id = ""
 
     session = _get_session()
     try:
@@ -913,6 +994,7 @@ async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, A
                 thread_ts = opened_plan_schedule.thread_ts or ""
                 opened_plan_schedule.state = ScheduleState.DONE
                 opened_plan_schedule.updated_at = now
+                opened_plan_schedule_id = str(opened_plan_schedule.id)
 
         # Wash phase: mark all pending schedules for this user as canceled.
         pending_canceled = (
@@ -932,16 +1014,16 @@ async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, A
 
         # INSERT phase: reminders.
         for reminder in remind_rows_to_save:
-            session.add(
-                Schedule(
-                    user_id=user_id,
-                    event_type=EventType.REMIND,
-                    run_at=reminder["run_at"],
-                    state=ScheduleState.PENDING,
-                    retry_count=0,
-                    comment=reminder["task"],
-                )
+            remind_schedule = Schedule(
+                user_id=user_id,
+                event_type=EventType.REMIND,
+                run_at=reminder["run_at"],
+                state=ScheduleState.PENDING,
+                retry_count=0,
+                comment=reminder["task"],
             )
+            session.add(remind_schedule)
+            inserted_remind_schedule_ids.append(str(remind_schedule.id))
 
         # INSERT phase: next plan.
         next_plan_run_at = _resolve_relative_datetime(
@@ -958,6 +1040,16 @@ async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, A
                 comment="next plan",
             )
         )
+
+        # Record explicit "skip" decisions in action_logs.
+        if opened_plan_schedule_id:
+            for _task_name in skipped_task_names:
+                session.add(
+                    ActionLog(
+                        schedule_id=opened_plan_schedule_id,
+                        result=ActionResult.NO,
+                    )
+                )
 
         session.commit()
     except Exception as exc:
@@ -990,6 +1082,7 @@ async def process_plan_modal_submit(payload_data: Dict[str, Any]) -> Dict[str, A
             thread_ts=thread_ts,
         )
     )
+    asyncio.create_task(_run_agent_call(inserted_remind_schedule_ids))
 
     return {
         "response_action": "clear",

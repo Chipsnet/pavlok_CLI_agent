@@ -103,6 +103,7 @@ AUTHORIZED_USERS=U03JBULT484
 | TIMEOUT_REMIND | 600 | リマインドタイムアウト（秒） |
 | TIMEOUT_REVIEW | 600 | 振り返りタイムアウト（秒） |
 | RETRY_DELAY | 5 | リトライ遅延（分） |
+| COACH_CHARACTOR | うる星やつらのラムちゃん | agent_callコメント生成時の口調 |
 
 ---
 

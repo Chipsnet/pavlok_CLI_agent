@@ -138,6 +138,12 @@ class TestBlockKitConfig:
         headers = [b for b in modal["blocks"] if b.get("type") == "header"]
         assert len(headers) >= 3
 
+        coach_block = next(
+            (b for b in modal["blocks"] if b.get("block_id") == "COACH_CHARACTOR"),
+            None,
+        )
+        assert coach_block is not None
+
     def test_config_modal_punishment_values(self):
         """Punishment config should have correct initial values"""
         from backend.slack_ui import config_modal

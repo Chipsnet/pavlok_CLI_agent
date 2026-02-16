@@ -10,7 +10,7 @@ from backend.api.command import (
     process_restart,
     process_config
 )
-from backend.models import Schedule, Base, Commitment
+from backend.models import Schedule, Base, Commitment, Configuration, ConfigValueType
 
 
 @pytest.mark.asyncio
@@ -128,3 +128,104 @@ class TestCommandApi:
         result = await process_config(request, config_data)
 
         assert result["status"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_config_command_opens_modal_with_charactor_prefill(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "config_modal.db"
+        database_url = f"sqlite:///{db_path}"
+        engine = create_engine(database_url, connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+        session = Session()
+        try:
+            session.add(
+                Configuration(
+                    user_id="U_TEST",
+                    key="COACH_CHARACTOR",
+                    value="シビュラシステム",
+                    value_type=ConfigValueType.STR,
+                )
+            )
+            session.commit()
+        finally:
+            session.close()
+
+        monkeypatch.setenv("DATABASE_URL", database_url)
+        monkeypatch.setattr("backend.api.command._SESSION_FACTORY", None)
+        monkeypatch.setattr("backend.api.command._SESSION_DB_URL", None)
+
+        captured: dict = {}
+
+        def fake_open_slack_modal(trigger_id, view):
+            captured["trigger_id"] = trigger_id
+            captured["view"] = view
+            return True, "ok"
+
+        monkeypatch.setattr("backend.api.command._open_slack_modal", fake_open_slack_modal)
+
+        result = await process_config(
+            {
+                "user_id": "U_TEST",
+                "trigger_id": "TRIGGER_TEST",
+                "channel_id": "C_TEST",
+            }
+        )
+
+        assert result["status"] == "success"
+        assert captured["trigger_id"] == "TRIGGER_TEST"
+        blocks = captured["view"]["blocks"]
+        coach_block = next(
+            (b for b in blocks if b.get("block_id") == "COACH_CHARACTOR"),
+            None,
+        )
+        assert coach_block is not None
+        assert coach_block["element"]["initial_value"] == "シビュラシステム"
+
+    @pytest.mark.asyncio
+    async def test_config_submit_saves_charactor(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "config_submit.db"
+        database_url = f"sqlite:///{db_path}"
+        engine = create_engine(database_url, connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+        monkeypatch.setenv("DATABASE_URL", database_url)
+        monkeypatch.setattr("backend.api.command._SESSION_FACTORY", None)
+        monkeypatch.setattr("backend.api.command._SESSION_DB_URL", None)
+
+        payload = {
+            "type": "view_submission",
+            "user": {"id": "U_TEST"},
+            "view": {
+                "callback_id": "config_submit",
+                "state": {
+                    "values": {
+                        "COACH_CHARACTOR": {
+                            "COACH_CHARACTOR_input": {
+                                "type": "plain_text_input",
+                                "value": "ラムちゃん",
+                            }
+                        }
+                    }
+                },
+            },
+        }
+
+        result = await process_config(payload)
+        assert result["response_action"] == "clear"
+
+        session = Session()
+        try:
+            row = (
+                session.query(Configuration)
+                .filter(
+                    Configuration.user_id == "U_TEST",
+                    Configuration.key == "COACH_CHARACTOR",
+                )
+                .first()
+            )
+            assert row is not None
+            assert row.value == "ラムちゃん"
+        finally:
+            session.close()

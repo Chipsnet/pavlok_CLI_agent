@@ -203,6 +203,132 @@ class TestInteractiveApi:
         session.close()
 
     @pytest.mark.asyncio
+    async def test_plan_modal_submit_records_skip_to_action_logs(self, monkeypatch, tmp_path):
+        db_path = tmp_path / "plan_skip.sqlite3"
+        database_url = f"sqlite:///{db_path}"
+        monkeypatch.setenv("DATABASE_URL", database_url)
+        monkeypatch.setattr("backend.api.interactive._SESSION_FACTORY", None)
+        monkeypatch.setattr("backend.api.interactive._SESSION_DB_URL", None)
+
+        engine = create_engine(
+            database_url,
+            connect_args={"check_same_thread": False},
+        )
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine)
+
+        session = Session()
+        user_id = "U03JBULT484"
+        opened_plan = Schedule(
+            user_id=user_id,
+            event_type=EventType.PLAN,
+            run_at=datetime.now() - timedelta(minutes=1),
+            state=ScheduleState.PROCESSING,
+        )
+        session.add(opened_plan)
+        session.add_all(
+            [
+                Commitment(user_id=user_id, task="朝やる", time="06:00:00", active=True),
+                Commitment(user_id=user_id, task="昼やる", time="12:00:00", active=True),
+            ]
+        )
+        session.commit()
+        opened_plan_id = opened_plan.id
+        session.close()
+
+        payload_data = {
+            "type": "view_submission",
+            "user": {"id": user_id},
+            "view": {
+                "callback_id": "plan_submit",
+                "private_metadata": json.dumps(
+                    {
+                        "user_id": user_id,
+                        "schedule_id": opened_plan_id,
+                    }
+                ),
+                "state": {
+                    "values": {
+                        "task_1_date": {
+                            "date": {
+                                "selected_option": {
+                                    "value": "today",
+                                }
+                            }
+                        },
+                        "task_1_time": {
+                            "time": {
+                                "selected_time": "06:00",
+                            }
+                        },
+                        "task_1_skip": {
+                            "skip": {
+                                "selected_options": [
+                                    {"value": "skip"},
+                                ],
+                            }
+                        },
+                        "task_2_date": {
+                            "date": {
+                                "selected_option": {
+                                    "value": "today",
+                                }
+                            }
+                        },
+                        "task_2_time": {
+                            "time": {
+                                "selected_time": "12:00",
+                            }
+                        },
+                        "task_2_skip": {
+                            "skip": {
+                                "selected_options": [],
+                            }
+                        },
+                        "next_plan_date": {
+                            "date": {
+                                "selected_option": {
+                                    "value": "tomorrow",
+                                }
+                            }
+                        },
+                        "next_plan_time": {
+                            "time": {
+                                "selected_time": "07:00",
+                            }
+                        },
+                    }
+                },
+            },
+        }
+
+        result = await process_plan_modal_submit(payload_data)
+        assert result["response_action"] == "clear"
+
+        session = Session()
+        skipped_logs = (
+            session.query(ActionLog)
+            .filter(
+                ActionLog.schedule_id == opened_plan_id,
+                ActionLog.result == ActionResult.NO,
+            )
+            .all()
+        )
+        assert len(skipped_logs) == 1
+
+        remind_pending = (
+            session.query(Schedule)
+            .filter(
+                Schedule.user_id == user_id,
+                Schedule.event_type == EventType.REMIND,
+                Schedule.state == ScheduleState.PENDING,
+            )
+            .all()
+        )
+        assert len(remind_pending) == 1
+        session.close()
+
+    @pytest.mark.asyncio
     async def test_remind_response_yes(self, v3_db_session, v3_test_data_factory):
         schedule = v3_test_data_factory.create_schedule()
 

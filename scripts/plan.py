@@ -30,7 +30,7 @@ def main():
         sys.exit(1)
 
     # Get user's commitments from database
-    from backend.models import Commitment
+    from backend.models import Commitment, Schedule
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
@@ -39,8 +39,14 @@ def main():
     session = Session()
 
     try:
+        schedule = session.query(Schedule).filter_by(id=schedule_id).first()
+        if not schedule:
+            print(f"Error: Schedule {schedule_id} not found")
+            sys.exit(1)
+
         # Get active commitments
         commitments = session.query(Commitment).filter_by(
+            user_id=schedule.user_id,
             active=True
         ).order_by(Commitment.time).all()
 
@@ -73,11 +79,8 @@ def main():
         print(f"Plan notification sent. thread_ts: {thread_ts}")
 
         # Update schedule with thread_ts
-        from backend.models import Schedule
-        schedule = session.query(Schedule).filter_by(id=schedule_id).first()
-        if schedule:
-            schedule.thread_ts = thread_ts
-            session.commit()
+        schedule.thread_ts = thread_ts
+        session.commit()
 
     finally:
         session.close()

@@ -711,6 +711,35 @@ class BlockKitBuilder:
                 "type": "divider"
             },
             {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": "💬 コーチ口調設定"
+                }
+            },
+            {
+                "type": "input",
+                "block_id": "COACH_CHARACTOR",
+                "label": {
+                    "type": "plain_text",
+                    "text": "キャラクター"
+                },
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "COACH_CHARACTOR_input",
+                    "initial_value": config_values.get("COACH_CHARACTOR", "うる星やつらのラムちゃん"),
+                    "placeholder": {
+                        "type": "plain_text",
+                        "text": "例: うる星やつらのラムちゃん"
+                    },
+                    "min_length": 1,
+                    "max_length": 100
+                }
+            },
+            {
+                "type": "divider"
+            },
+            {
                 "type": "actions",
                 "elements": [
                     {
