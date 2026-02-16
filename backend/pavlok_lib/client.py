@@ -12,7 +12,7 @@ import requests
 class PavlokClient:
     """Pavlok APIクライアントクラス"""
 
-    PAVLOK_API_BASE = "https://app.pavlok-the-api.com/api/v5"
+    PAVLOK_API_BASE = "https://api.pavlok.com/api/v5"
 
     VALID_STIMULUS_TYPES = ("zap", "beep", "vibe")
 
@@ -29,7 +29,7 @@ class PavlokClient:
             http_client: HTTPクライアント（テスト用モック注入）
         """
         self.api_key = api_key or os.getenv("PAVLOK_API_KEY")
-        self.api_base = api_base or self.PAVLOK_API_BASE
+        self.api_base = api_base or os.getenv("PAVLOK_API_BASE") or self.PAVLOK_API_BASE
         self.http_client = http_client or requests
 
         if not self.api_key:

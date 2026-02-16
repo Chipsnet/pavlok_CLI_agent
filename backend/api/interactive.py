@@ -1211,6 +1211,24 @@ def _extract_action_channel_id(payload_data: Dict[str, Any]) -> str:
     return ""
 
 
+def _extract_action_thread_ts(payload_data: Dict[str, Any]) -> str:
+    """Extract thread timestamp from interactive payload."""
+    container = payload_data.get("container", {})
+    if isinstance(container, dict):
+        for key in ("thread_ts", "message_ts"):
+            value = container.get(key, "")
+            if isinstance(value, str) and value:
+                return value
+
+    message = payload_data.get("message", {})
+    if isinstance(message, dict):
+        for key in ("thread_ts", "ts"):
+            value = message.get(key, "")
+            if isinstance(value, str) and value:
+                return value
+    return ""
+
+
 def _calc_no_streak_count(session, user_id: str) -> int:
     """
     Count consecutive NO responses for remind events.
@@ -1264,13 +1282,57 @@ def _load_punishment_for_no(session, user_id: str, no_count: int) -> dict[str, A
     return {"type": punish_type, "value": value}
 
 
+async def _send_no_punishment(
+    user_id: str,
+    schedule_id: str,
+    punishment: dict[str, Any],
+) -> None:
+    """Send Pavlok stimulus for NO response."""
+    stimulus_type = str(punishment.get("type", "zap")).strip().lower()
+    if stimulus_type not in {"zap", "beep", "vibe"}:
+        stimulus_type = "zap"
+
+    try:
+        value = int(punishment.get("value", 50))
+    except (TypeError, ValueError):
+        value = 50
+    value = max(0, min(100, value))
+
+    def _send() -> tuple[bool, str]:
+        try:
+            from backend.pavlok_lib import PavlokClient
+            client = PavlokClient()
+            result = client.stimulate(stimulus_type=stimulus_type, value=value)
+        except Exception as exc:
+            return False, str(exc)
+
+        if isinstance(result, dict) and result.get("success"):
+            return True, "ok"
+        return False, str(result)
+
+    ok, detail = await asyncio.to_thread(_send)
+    if ok:
+        print(
+            f"[{datetime.now()}] no-punishment sent: "
+            f"user_id={user_id} schedule_id={schedule_id} "
+            f"type={stimulus_type} value={value}"
+        )
+    else:
+        print(
+            f"[{datetime.now()}] no-punishment failed: "
+            f"user_id={user_id} schedule_id={schedule_id} "
+            f"type={stimulus_type} value={value} detail={detail}"
+        )
+
+
 async def _notify_remind_result(
     channel_id: str,
     user_id: str,
+    thread_ts: str,
     text: str,
     blocks: list[dict[str, Any]],
 ) -> None:
-    """Post remind result as a new Slack message."""
+    """Post remind result as a threaded Slack message."""
     bot_token = os.getenv("SLACK_BOT_USER_OAUTH_TOKEN")
     if not bot_token:
         print(
@@ -1285,65 +1347,51 @@ async def _notify_remind_result(
     }
 
     def _post() -> tuple[bool, str]:
-        def _open_dm_channel() -> tuple[str, str]:
-            try:
-                open_resp = requests.post(
-                    "https://slack.com/api/conversations.open",
-                    headers=headers,
-                    json={"users": user_id},
-                    timeout=2.5,
-                )
-                open_body = open_resp.json()
-            except (requests.RequestException, ValueError) as exc:
-                return "", f"conversations.open failed: {exc}"
+        if not channel_id:
+            return False, "missing channel_id for threaded response"
 
-            if not open_body.get("ok"):
-                return "", f"conversations.open error: {open_body.get('error')}"
+        payload_blocks = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"<@{user_id}>",
+                },
+            },
+            *blocks,
+        ]
 
-            dm_channel = open_body.get("channel", {}).get("id", "")
-            if not dm_channel:
-                return "", "conversations.open returned no channel id"
-            return dm_channel, "ok"
+        post_payload: dict[str, Any] = {
+            "channel": channel_id,
+            "text": text,
+            "blocks": payload_blocks,
+            "unfurl_links": False,
+            "unfurl_media": False,
+        }
+        if thread_ts:
+            post_payload["thread_ts"] = thread_ts
+            post_payload["reply_broadcast"] = False
 
-        def _post_message(target_channel: str) -> tuple[bool, str]:
-            try:
-                post_resp = requests.post(
-                    "https://slack.com/api/chat.postMessage",
-                    headers=headers,
-                    json={
-                        "channel": target_channel,
-                        "text": text,
-                        "blocks": blocks,
-                        "unfurl_links": False,
-                        "unfurl_media": False,
-                    },
-                    timeout=2.5,
-                )
-                post_body = post_resp.json()
-            except (requests.RequestException, ValueError) as exc:
-                return False, f"chat.postMessage failed: {exc}"
+        try:
+            post_resp = requests.post(
+                "https://slack.com/api/chat.postMessage",
+                headers=headers,
+                json=post_payload,
+                timeout=2.5,
+            )
+            post_body = post_resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            return False, f"chat.postMessage failed: {exc}"
 
-            if not post_body.get("ok"):
-                return False, f"chat.postMessage error: {post_body.get('error')}"
-            return True, "ok"
-
-        if channel_id:
-            ok, reason = _post_message(channel_id)
-            if ok:
-                return True, "ok"
-            if "not_in_channel" not in reason and "channel_not_found" not in reason:
-                return False, reason
-
-        dm_channel, dm_reason = _open_dm_channel()
-        if not dm_channel:
-            return False, dm_reason
-        return _post_message(dm_channel)
+        if not post_body.get("ok"):
+            return False, f"chat.postMessage error: {post_body.get('error')}"
+        return True, "ok"
 
     ok, reason = await asyncio.to_thread(_post)
     if ok:
         print(
             f"[{datetime.now()}] remind-result notification sent: "
-            f"user_id={user_id} channel={channel_id or '(dm)'}"
+            f"user_id={user_id} channel={channel_id} thread_ts={thread_ts or '-'}"
         )
     else:
         print(f"[{datetime.now()}] remind-result notification failed: {reason}")
@@ -1363,6 +1411,7 @@ async def process_remind_response(payload_data: Dict[str, Any], action: str = "Y
     user_id = payload_data.get("user", {}).get("id", "")
     schedule_id = _extract_schedule_id_from_action(payload_data)
     channel_id = _extract_action_channel_id(payload_data)
+    thread_ts = _extract_action_thread_ts(payload_data)
     action_value = "YES" if action == "YES" else "NO"
 
     if not user_id or not schedule_id:
@@ -1388,6 +1437,23 @@ async def process_remind_response(payload_data: Dict[str, Any], action: str = "Y
                 "response_type": "ephemeral",
                 "replace_original": False,
                 "text": "対象スケジュールが見つかりませんでした。",
+            }
+
+        existing_action = (
+            session.query(ActionLog.id)
+            .filter(
+                ActionLog.schedule_id == schedule.id,
+                ActionLog.result.in_([ActionResult.YES, ActionResult.NO]),
+            )
+            .first()
+        )
+        if existing_action:
+            return {
+                "status": "success",
+                "detail": "すでに応答済みです。",
+                "response_type": "ephemeral",
+                "replace_original": False,
+                "text": "すでに応答済みです。",
             }
 
         action_result = ActionResult.YES if action_value == "YES" else ActionResult.NO
@@ -1442,10 +1508,19 @@ async def process_remind_response(payload_data: Dict[str, Any], action: str = "Y
         _notify_remind_result(
             channel_id=channel_id,
             user_id=user_id,
+            thread_ts=thread_ts,
             text=text,
             blocks=blocks,
         )
     )
+    if action_value == "NO":
+        asyncio.create_task(
+            _send_no_punishment(
+                user_id=user_id,
+                schedule_id=schedule_id,
+                punishment=punishment,
+            )
+        )
 
     # Slack block_actions ack payload (valid message response).
     return {

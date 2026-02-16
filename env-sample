@@ -1,5 +1,6 @@
 # ===== 認証情報 =====
 PAVLOK_API_KEY={YOUR_API_KEY} # Pavlok APIキー
+PAVLOK_API_BASE=https://api.pavlok.com/api/v5 # Pavlok APIベースURL（通常は変更不要）
 SLACK_BOT_USER_OAUTH_TOKEN={YOUR_API_KEY} # Slack Bot User OAuth Token
 SLACK_USER_OAUTH_TOKEN={YOUR_API_KEY} # Slack User OAuth Token（ユーザー権限が必要な操作用）
 
