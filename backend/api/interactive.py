@@ -19,6 +19,7 @@ from backend.models import (
     EventType,
     ActionLog,
     ActionResult,
+    Configuration,
 )
 
 MAX_COMMITMENT_ROWS = 10
@@ -1169,6 +1170,185 @@ def _normalize_time(raw_time: str) -> str:
     return ""
 
 
+def _extract_schedule_id_from_action(payload_data: Dict[str, Any]) -> str:
+    """Extract schedule_id from block action payload value JSON."""
+    actions = payload_data.get("actions", [])
+    if not isinstance(actions, list) or not actions:
+        return ""
+    first_action = actions[0]
+    if not isinstance(first_action, dict):
+        return ""
+
+    raw_value = first_action.get("value", "")
+    if not isinstance(raw_value, str) or not raw_value:
+        return ""
+
+    try:
+        parsed = json.loads(raw_value)
+    except (TypeError, json.JSONDecodeError):
+        # Backward-compatible fallback: treat value itself as schedule_id.
+        return raw_value.strip()
+
+    if not isinstance(parsed, dict):
+        return ""
+    schedule_id = parsed.get("schedule_id", "")
+    return schedule_id if isinstance(schedule_id, str) else ""
+
+
+def _extract_action_channel_id(payload_data: Dict[str, Any]) -> str:
+    """Extract channel_id from interactive payload."""
+    container = payload_data.get("container", {})
+    if isinstance(container, dict):
+        channel_id = container.get("channel_id", "")
+        if isinstance(channel_id, str) and channel_id:
+            return channel_id
+
+    channel = payload_data.get("channel", {})
+    if isinstance(channel, dict):
+        channel_id = channel.get("id", "")
+        if isinstance(channel_id, str):
+            return channel_id
+    return ""
+
+
+def _calc_no_streak_count(session, user_id: str) -> int:
+    """
+    Count consecutive NO responses for remind events.
+    Traverses action_logs from newest and stops at the latest YES.
+    """
+    rows = (
+        session.query(ActionLog.result)
+        .join(Schedule, ActionLog.schedule_id == Schedule.id)
+        .filter(Schedule.user_id == user_id, Schedule.event_type == EventType.REMIND)
+        .order_by(ActionLog.created_at.desc())
+        .limit(200)
+        .all()
+    )
+
+    streak = 0
+    for (result,) in rows:
+        if result == ActionResult.NO:
+            streak += 1
+            continue
+        if result == ActionResult.YES:
+            break
+    return max(streak, 1)
+
+
+def _load_punishment_for_no(session, user_id: str, no_count: int) -> dict[str, Any]:
+    """Build punishment display data from user config and NO streak count."""
+    config_rows = (
+        session.query(Configuration)
+        .filter(
+            Configuration.user_id == user_id,
+            Configuration.key.in_(
+                ["PAVLOK_TYPE_PUNISH", "PAVLOK_VALUE_PUNISH", "LIMIT_PAVLOK_ZAP_VALUE"]
+            ),
+        )
+        .all()
+    )
+    config_map = {row.key: str(row.value) for row in config_rows}
+
+    punish_type = config_map.get("PAVLOK_TYPE_PUNISH", "zap")
+    try:
+        base_value = int(config_map.get("PAVLOK_VALUE_PUNISH", "50"))
+    except ValueError:
+        base_value = 50
+    try:
+        limit_value = int(config_map.get("LIMIT_PAVLOK_ZAP_VALUE", "100"))
+    except ValueError:
+        limit_value = 100
+
+    value = min(base_value + (10 * max(no_count - 1, 0)), limit_value)
+    value = max(value, 0)
+    return {"type": punish_type, "value": value}
+
+
+async def _notify_remind_result(
+    channel_id: str,
+    user_id: str,
+    text: str,
+    blocks: list[dict[str, Any]],
+) -> None:
+    """Post remind result as a new Slack message."""
+    bot_token = os.getenv("SLACK_BOT_USER_OAUTH_TOKEN")
+    if not bot_token:
+        print(
+            f"[{datetime.now()}] skip remind-result notification: "
+            "SLACK_BOT_USER_OAUTH_TOKEN is not configured"
+        )
+        return
+
+    headers = {
+        "Authorization": f"Bearer {bot_token}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+
+    def _post() -> tuple[bool, str]:
+        def _open_dm_channel() -> tuple[str, str]:
+            try:
+                open_resp = requests.post(
+                    "https://slack.com/api/conversations.open",
+                    headers=headers,
+                    json={"users": user_id},
+                    timeout=2.5,
+                )
+                open_body = open_resp.json()
+            except (requests.RequestException, ValueError) as exc:
+                return "", f"conversations.open failed: {exc}"
+
+            if not open_body.get("ok"):
+                return "", f"conversations.open error: {open_body.get('error')}"
+
+            dm_channel = open_body.get("channel", {}).get("id", "")
+            if not dm_channel:
+                return "", "conversations.open returned no channel id"
+            return dm_channel, "ok"
+
+        def _post_message(target_channel: str) -> tuple[bool, str]:
+            try:
+                post_resp = requests.post(
+                    "https://slack.com/api/chat.postMessage",
+                    headers=headers,
+                    json={
+                        "channel": target_channel,
+                        "text": text,
+                        "blocks": blocks,
+                        "unfurl_links": False,
+                        "unfurl_media": False,
+                    },
+                    timeout=2.5,
+                )
+                post_body = post_resp.json()
+            except (requests.RequestException, ValueError) as exc:
+                return False, f"chat.postMessage failed: {exc}"
+
+            if not post_body.get("ok"):
+                return False, f"chat.postMessage error: {post_body.get('error')}"
+            return True, "ok"
+
+        if channel_id:
+            ok, reason = _post_message(channel_id)
+            if ok:
+                return True, "ok"
+            if "not_in_channel" not in reason and "channel_not_found" not in reason:
+                return False, reason
+
+        dm_channel, dm_reason = _open_dm_channel()
+        if not dm_channel:
+            return False, dm_reason
+        return _post_message(dm_channel)
+
+    ok, reason = await asyncio.to_thread(_post)
+    if ok:
+        print(
+            f"[{datetime.now()}] remind-result notification sent: "
+            f"user_id={user_id} channel={channel_id or '(dm)'}"
+        )
+    else:
+        print(f"[{datetime.now()}] remind-result notification failed: {reason}")
+
+
 async def process_remind_response(payload_data: Dict[str, Any], action: str = "YES") -> Dict[str, Any]:
     """
     リマインド応答処理（YES/NO）
@@ -1180,17 +1360,101 @@ async def process_remind_response(payload_data: Dict[str, Any], action: str = "Y
     Returns:
         Dict[str, Any]: 処理結果
     """
-    # TODO: Implement actual remind response processing with database
-    if action == "YES":
+    user_id = payload_data.get("user", {}).get("id", "")
+    schedule_id = _extract_schedule_id_from_action(payload_data)
+    channel_id = _extract_action_channel_id(payload_data)
+    action_value = "YES" if action == "YES" else "NO"
+
+    if not user_id or not schedule_id:
         return {
             "status": "success",
-            "detail": "やりました！"
+            "detail": "対象が見つかりませんでした。",
+            "response_type": "ephemeral",
+            "replace_original": False,
+            "text": "対象が見つかりませんでした。",
         }
-    else:
+
+    session = _get_session()
+    try:
+        schedule = (
+            session.query(Schedule)
+            .filter(Schedule.id == schedule_id, Schedule.user_id == user_id)
+            .first()
+        )
+        if not schedule:
+            return {
+                "status": "success",
+                "detail": "対象スケジュールが見つかりませんでした。",
+                "response_type": "ephemeral",
+                "replace_original": False,
+                "text": "対象スケジュールが見つかりませんでした。",
+            }
+
+        action_result = ActionResult.YES if action_value == "YES" else ActionResult.NO
+        session.add(
+            ActionLog(
+                schedule_id=schedule.id,
+                result=action_result,
+            )
+        )
+        schedule.state = ScheduleState.DONE
+        schedule.updated_at = datetime.now()
+        session.commit()
+
+        task_name = schedule.comment or "タスク"
+        if action_value == "YES":
+            detail = "やりました！"
+            text = f"<@{user_id}> {task_name} を完了として記録しました。"
+            from backend.slack_ui import remind_yes_response
+
+            blocks = remind_yes_response(
+                task_name=task_name,
+                comment=schedule.yes_comment or "よくやった。この調子で継続しよう。",
+            )
+        else:
+            detail = "できませんでした..."
+            text = f"<@{user_id}> {task_name} は未達として記録しました。"
+            no_count = _calc_no_streak_count(session, user_id)
+            punishment = _load_punishment_for_no(session, user_id, no_count)
+            from backend.slack_ui import remind_no_response
+
+            blocks = remind_no_response(
+                task_name=task_name,
+                no_count=no_count,
+                punishment=punishment,
+                comment=schedule.no_comment or "次の一手をいま決めよう。",
+            )
+
+    except Exception as exc:
+        session.rollback()
+        print(f"[{datetime.now()}] process_remind_response DB error: {exc}")
         return {
             "status": "success",
-            "detail": "できませんでした..."
+            "detail": "処理に失敗しました。",
+            "response_type": "ephemeral",
+            "replace_original": False,
+            "text": "処理に失敗しました。再度お試しください。",
         }
+    finally:
+        session.close()
+
+    asyncio.create_task(
+        _notify_remind_result(
+            channel_id=channel_id,
+            user_id=user_id,
+            text=text,
+            blocks=blocks,
+        )
+    )
+
+    # Slack block_actions ack payload (valid message response).
+    return {
+        "status": "success",
+        "detail": detail,
+        "response_type": "ephemeral",
+        "replace_original": False,
+        "text": detail,
+    }
 
 
 async def process_ignore_response(payload_data: Dict[str, Any]) -> Dict[str, Any]:

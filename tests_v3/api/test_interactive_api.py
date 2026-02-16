@@ -329,46 +329,118 @@ class TestInteractiveApi:
         session.close()
 
     @pytest.mark.asyncio
-    async def test_remind_response_yes(self, v3_db_session, v3_test_data_factory):
-        schedule = v3_test_data_factory.create_schedule()
+    async def test_remind_response_yes(self, monkeypatch, tmp_path):
+        db_path = tmp_path / "remind_yes.sqlite3"
+        database_url = f"sqlite:///{db_path}"
+        monkeypatch.setenv("DATABASE_URL", database_url)
+        monkeypatch.setattr("backend.api.interactive._SESSION_FACTORY", None)
+        monkeypatch.setattr("backend.api.interactive._SESSION_DB_URL", None)
 
-        action_log = ActionLog(
-            schedule_id=schedule.id,
-            result=ActionResult.YES
+        engine = create_engine(
+            database_url,
+            connect_args={"check_same_thread": False},
         )
-        v3_db_session.add(action_log)
-        v3_db_session.commit()
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine)
+
+        session = Session()
+        user_id = "U03JBULT484"
+        schedule = Schedule(
+            user_id=user_id,
+            event_type=EventType.REMIND,
+            run_at=datetime.now(),
+            state=ScheduleState.PROCESSING,
+            comment="朝のジム",
+        )
+        session.add(schedule)
+        session.commit()
+        schedule_id = schedule.id
+        session.close()
 
         payload_data = {
             "type": "block_actions",
-            "user": {"id": "U03JBULT484"},
-            "actions": [{"action_id": "remind_yes", "value": f'{{"schedule_id": "{schedule.id}"}}'}]
+            "user": {"id": user_id},
+            "actions": [{"action_id": "remind_yes", "value": f'{{"schedule_id": "{schedule_id}"}}'}],
+            "container": {"channel_id": "C123"},
         }
 
         result = await process_remind_response(payload_data, "YES")
         assert result["status"] == "success"
         assert result.get("detail") == "やりました！"
+        assert result.get("response_type") == "ephemeral"
+        assert result.get("replace_original") is False
+
+        session = Session()
+        refreshed = session.get(Schedule, schedule_id)
+        assert refreshed is not None
+        assert refreshed.state == ScheduleState.DONE
+        yes_count = (
+            session.query(ActionLog)
+            .filter(
+                ActionLog.schedule_id == schedule_id,
+                ActionLog.result == ActionResult.YES,
+            )
+            .count()
+        )
+        assert yes_count == 1
+        session.close()
 
     @pytest.mark.asyncio
-    async def test_remind_response_no(self, v3_db_session, v3_test_data_factory):
-        schedule = v3_test_data_factory.create_schedule()
+    async def test_remind_response_no(self, monkeypatch, tmp_path):
+        db_path = tmp_path / "remind_no.sqlite3"
+        database_url = f"sqlite:///{db_path}"
+        monkeypatch.setenv("DATABASE_URL", database_url)
+        monkeypatch.setattr("backend.api.interactive._SESSION_FACTORY", None)
+        monkeypatch.setattr("backend.api.interactive._SESSION_DB_URL", None)
 
-        action_log = ActionLog(
-            schedule_id=schedule.id,
-            result=ActionResult.NO
+        engine = create_engine(
+            database_url,
+            connect_args={"check_same_thread": False},
         )
-        v3_db_session.add(action_log)
-        v3_db_session.commit()
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine)
+
+        session = Session()
+        user_id = "U03JBULT484"
+        schedule = Schedule(
+            user_id=user_id,
+            event_type=EventType.REMIND,
+            run_at=datetime.now(),
+            state=ScheduleState.PROCESSING,
+            comment="朝のジム",
+        )
+        session.add(schedule)
+        session.commit()
+        schedule_id = schedule.id
+        session.close()
 
         payload_data = {
             "type": "block_actions",
-            "user": {"id": "U03JBULT484"},
-            "actions": [{"action_id": "remind_no", "value": f'{{"schedule_id": "{schedule.id}"}}'}]
+            "user": {"id": user_id},
+            "actions": [{"action_id": "remind_no", "value": f'{{"schedule_id": "{schedule_id}"}}'}],
+            "container": {"channel_id": "C123"},
         }
 
         result = await process_remind_response(payload_data, "NO")
         assert result["status"] == "success"
         assert result.get("detail") == "できませんでした..."
+        assert result.get("response_type") == "ephemeral"
+        assert result.get("replace_original") is False
+
+        session = Session()
+        refreshed = session.get(Schedule, schedule_id)
+        assert refreshed is not None
+        assert refreshed.state == ScheduleState.DONE
+        no_count = (
+            session.query(ActionLog)
+            .filter(
+                ActionLog.schedule_id == schedule_id,
+                ActionLog.result == ActionResult.NO,
+            )
+            .count()
+        )
+        assert no_count == 1
+        session.close()
 
     @pytest.mark.asyncio
     async def test_ignore_response_yes(self, v3_db_session, v3_test_data_factory):
