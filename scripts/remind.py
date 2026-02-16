@@ -21,6 +21,35 @@ from backend.slack_lib.blockkit import BlockKitBuilder
 from scripts import slack
 
 
+def build_remind_content(session, schedule) -> tuple[str, str, str]:
+    """Resolve task name/time/description for remind notification."""
+    from backend.models import Commitment
+
+    if isinstance(schedule.run_at, datetime):
+        task_time = schedule.run_at.strftime("%H:%M:%S")
+    else:
+        task_time = "--:--:--"
+
+    # Match commitment by exact time to avoid picking unrelated active rows.
+    commitment = (
+        session.query(Commitment)
+        .filter_by(
+            user_id=schedule.user_id,
+            active=True,
+            time=task_time,
+        )
+        .first()
+    )
+
+    if commitment:
+        task_name = commitment.task
+    else:
+        task_name = (schedule.comment or "").strip() or "タスク"
+
+    description = schedule.comment or "やってるか？"
+    return task_name, task_time, description
+
+
 def main():
     """remindイベントメイン処理"""
     schedule_id = os.getenv("SCHEDULE_ID")
@@ -29,7 +58,7 @@ def main():
         sys.exit(1)
 
     # Get schedule from database
-    from backend.models import Schedule, Commitment
+    from backend.models import Schedule
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
@@ -43,20 +72,7 @@ def main():
             print(f"Error: Schedule {schedule_id} not found")
             sys.exit(1)
 
-        # Get associated commitment
-        commitment = session.query(Commitment).filter_by(
-            user_id=schedule.user_id,
-            active=True
-        ).first()
-
-        if not commitment:
-            task_name = "タスク"
-            task_time = "--:--"
-            description = "予定がありません"
-        else:
-            task_name = commitment.task
-            task_time = commitment.time
-            description = schedule.yes_comment or "やってるか？"
+        task_name, task_time, description = build_remind_content(session, schedule)
 
         # Get channel
         channel = slack.require_channel()
