@@ -2,6 +2,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 import traceback
 from datetime import timedelta
@@ -81,6 +82,9 @@ class ScheduleExecutor:
             self.log(f"PATH={os.environ.get('PATH', '')}")
         else:
             self.log(f"resolved '{executable}' -> {resolved}")
+
+        if sys.platform == "win32":
+            cmd = ["cmd", "/c"] + cmd
 
         self.log(f"{self.format_command(cmd, prompt)}")
         return subprocess.run(
