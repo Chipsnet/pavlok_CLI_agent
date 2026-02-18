@@ -10,6 +10,7 @@ dependencies = [
   "pytest>=8.2.0",
   "requests>=2.32.5",
   "SQLAlchemy>=2.0.36",
+  "tzdata>=2025.3",
 ]
 
 [build-system]

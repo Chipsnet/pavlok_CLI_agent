@@ -53,7 +53,7 @@ class ScheduleExecutor:
         prompt_path = self.prompt_dir / f"{schedule.prompt_name}.md"
         if not prompt_path.exists():
             raise FileNotFoundError(f"Prompt not found: {prompt_path}")
-        template = prompt_path.read_text()
+        template = prompt_path.read_text(encoding="utf-8")
         context = {
             "input_value": schedule.input_value,
             "schedule_id": schedule.id,
@@ -73,7 +73,7 @@ class ScheduleExecutor:
             raise ValueError("AGENT_MODE must be 'codex_cli' or 'gemini_cli'.")
 
         self.log(f"{self.format_command(cmd)}")
-        return subprocess.run(cmd, text=True, check=False)
+        return subprocess.run(cmd, text=True, check=False, encoding="utf-8", errors="replace")
 
     @staticmethod
     def format_command(cmd: list[str], max_prompt: int = 200) -> str:
