@@ -66,22 +66,24 @@ class ScheduleExecutor:
     def run_agent(self, prompt: str) -> subprocess.CompletedProcess:
         mode = os.getenv("AGENT_MODE")
         if mode == "codex_cli":
-            cmd = ["codex", "exec", prompt]
+            cmd = ["codex", "exec"]
         elif mode == "gemini_cli":
-            cmd = ["gemini", "-y", prompt]
+            cmd = ["gemini", "-y"]
         else:
             raise ValueError("AGENT_MODE must be 'codex_cli' or 'gemini_cli'.")
 
-        self.log(f"{self.format_command(cmd)}")
-        return subprocess.run(cmd, text=True, check=False, encoding="utf-8", errors="replace")
+        self.log(f"{self.format_command(cmd, prompt)}")
+        return subprocess.run(
+            cmd, input=prompt, text=True, check=False,
+            encoding="utf-8", errors="replace",
+        )
 
     @staticmethod
-    def format_command(cmd: list[str], max_prompt: int = 200) -> str:
-        prompt = cmd[2].replace("\n", " ").strip()
-        if len(prompt) > max_prompt:
-            prompt = f"{prompt[:max_prompt]}...({len(prompt)} chars)"
-        safe_cmd = [cmd[0], cmd[1], prompt]
-        return " ".join(shlex.quote(part) for part in safe_cmd)
+    def format_command(cmd: list[str], prompt: str, max_prompt: int = 200) -> str:
+        display = prompt.replace("\n", " ").strip()
+        if len(display) > max_prompt:
+            display = f"{display[:max_prompt]}...({len(display)} chars)"
+        return " ".join(shlex.quote(part) for part in [*cmd, display])
 
     @staticmethod
     def log(message: str) -> None:
