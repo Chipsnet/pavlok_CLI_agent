@@ -72,10 +72,7 @@ class ScheduleExecutor:
     def run_agent(self, prompt: str) -> subprocess.CompletedProcess:
         mode = os.getenv("AGENT_MODE")
         if mode == "codex_cli":
-            cmd = [
-                "codex", "exec",
-                "-c", "sandbox_workspace_write.network_access=true",
-            ]
+            cmd = ["codex", "exec", "--yolo"]
         elif mode == "gemini_cli":
             cmd = ["gemini", "-y"]
         else:
