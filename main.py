@@ -1,7 +1,9 @@
 import os
 import shlex
+import shutil
 import subprocess
 import time
+import traceback
 from datetime import timedelta
 from pathlib import Path
 
@@ -71,6 +73,14 @@ class ScheduleExecutor:
             cmd = ["gemini", "-y"]
         else:
             raise ValueError("AGENT_MODE must be 'codex_cli' or 'gemini_cli'.")
+
+        executable = cmd[0]
+        resolved = shutil.which(executable)
+        if resolved is None:
+            self.log(f"WARNING: '{executable}' not found on PATH")
+            self.log(f"PATH={os.environ.get('PATH', '')}")
+        else:
+            self.log(f"resolved '{executable}' -> {resolved}")
 
         self.log(f"{self.format_command(cmd, prompt)}")
         return subprocess.run(
@@ -151,6 +161,7 @@ class ScheduleExecutor:
                 "schedule_id="
                 f"{schedule.id} state=failed error={exc} retry_at={schedule.scheduled_date}"
             )
+            self.log(f"traceback:\n{traceback.format_exc()}")
         finally:
             session.commit()
 
