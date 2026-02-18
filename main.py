@@ -8,6 +8,9 @@ import traceback
 from datetime import timedelta
 from pathlib import Path
 
+if not os.environ.get("UV_CACHE_DIR"):
+    os.environ["UV_CACHE_DIR"] = str(Path(__file__).resolve().parent / ".uv-cache")
+
 from alembic import command
 from alembic.config import Config
 
